@@ -65,6 +65,7 @@ def get_current_time():
         return now.strftime("%Y-%m-%d %H:%M:%S")
 
 class DatabaseManager:
+    
     def __init__(self, db_path):
         db_dir = os.path.dirname(db_path)
         if db_dir and not os.path.exists(db_dir):
@@ -139,7 +140,7 @@ class DatabaseManager:
             ("冷龙峰", "涉海翎（帽子）,透骨香（腰部挂件）,转珠天轮（玩具）,鸷（宠物）,炽芒·邪锋（特殊腰部）,祆教神鸟像（家具）,太一玄晶（120级）")
         ]
         self.cursor.executemany('''
-            INSERT OR REPLACE INTO dungeons (name, special_drops) 
+            INSERT OR IGNORE INTO dungeons (name, special_drops) 
             VALUES (?, ?)
         ''', dungeons)
         self.conn.commit()
@@ -247,15 +248,27 @@ class JX3DungeonTracker:
         app_data_dir = get_app_data_path()
         db_path = os.path.join(app_data_dir, 'jx3_dungeon.db')
         
+        os.makedirs(app_data_dir, exist_ok=True)
+        
         if not os.path.exists(db_path):
             try:
                 default_db_path = resource_path('jx3_dungeon.db')
                 if os.path.exists(default_db_path):
                     shutil.copy2(default_db_path, db_path)
+                    print(f"Copied default database to: {db_path}")
+                else:
+                    print(f"Creating new database at: {db_path}")
             except Exception as e:
                 print(f"Failed to copy default database: {e}")
         
-        self.db = DatabaseManager(db_path)
+        try:
+            self.db = DatabaseManager(db_path)
+            print(f"Database initialized at: {db_path}")
+        except Exception as e:
+            messagebox.showerror("数据库错误", f"无法初始化数据库: {str(e)}")
+            self.root.destroy()
+            return
+        
         self.new_record_ids = set()
         self.setup_ui()
         self.setup_events()
