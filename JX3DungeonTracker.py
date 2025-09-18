@@ -26,7 +26,6 @@ except ImportError:
     MATPLOTLIB_AVAILABLE = False
 
 def resource_path(relative_path):
-    """获取资源路径，用于PyInstaller打包后的资源访问"""
     try:
         base_path = sys._MEIPASS
     except Exception:
@@ -34,7 +33,6 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 def get_app_data_path():
-    """获取应用程序数据目录，确保可写入"""
     if platform.system() == "Windows":
         app_data = os.getenv('APPDATA')
         app_dir = os.path.join(app_data, "JX3DungeonTracker")
@@ -59,7 +57,6 @@ def check_dependencies():
     return missing
 
 def get_current_time():
-    """获取当前时间，确保在打包环境中也能正确获取"""
     try:
         now = datetime.datetime.now()
         return now.strftime("%Y-%m-%d %H:%M:%S")
@@ -77,6 +74,7 @@ class DatabaseManager:
         self.cursor = self.conn.cursor()
         self.initialize_tables()
         self.load_preset_dungeons()
+        self.upgrade_database()
 
     def initialize_tables(self):
         self.cursor.execute('''
@@ -103,7 +101,8 @@ class DatabaseManager:
                 fine_gold INTEGER DEFAULT 0,
                 subsidy_gold INTEGER DEFAULT 0,
                 personal_gold INTEGER DEFAULT 0,
-                note TEXT DEFAULT ''
+                note TEXT DEFAULT '',
+                is_new INTEGER DEFAULT 0
             )
         ''')
         self.cursor.execute('''
@@ -114,6 +113,17 @@ class DatabaseManager:
         ''')
         self.conn.commit()
 
+    def upgrade_database(self):
+        try:
+            self.cursor.execute("PRAGMA table_info(records)")
+            columns = [column[1] for column in self.cursor.fetchall()]
+            
+            if 'is_new' not in columns:
+                self.cursor.execute("ALTER TABLE records ADD COLUMN is_new INTEGER DEFAULT 0")
+                self.conn.commit()
+        except Exception as e:
+            print(f"Database upgrade failed: {e}")
+
     def load_preset_dungeons(self):
         dungeons = [
             ("狼牙堡·狼神殿", "阿豪（宠物）,遗忘的书函（外观）,醉月玄晶（95级）"),
@@ -121,15 +131,15 @@ class DatabaseManager:
             ("范阳夜变", "簪花空竹（腰部挂件）,弃身·肆（特殊腰部）,幽明录（宠物）,润州绣舞筵（家具）,聆音（特殊腰部）,夜泊蝶影（披风）,归墟玄晶（100级）"),
             ("达摩洞", "活色生香（腰部挂件）,冰蚕龙渡（腰部挂件）,猿神发带（头饰）,漫漫香罗（奇趣坐骑）,阿修罗像（家具）,天乙玄晶（110级）"),
             ("白帝江关", "鲤跃龙门（背部挂件）,血佑铃（腰部挂件）,御马踏金·头饰（马具）,御马踏金·鞍饰（马具）,御马踏金·足饰（马具）,御马踏金（马具）,飞毛将军（普通坐骑）,阔豪（脚印）,天乙玄晶（110级）"),
-            ("雷域大泽", "大眼崽（宠物）,灵虫石像（家具）,脊骨王座（家具）,掠影无迹（背部挂件）,荒原切（腰部挂件）,游空竹翼（背部挂件）"),
-            ("河阳之战", "云鹤报捷（玩具）,玄域辟甲·头饰（马具）,玄域辟甲·鞍饰（马具）,玄域辟甲·足饰（马具）,玄域辟甲（马具）,扇风耳（宠物）,墨言（特殊背部）,天乙玄晶（110级）"),
+            ("雷域大泽", "大眼崽（宠物）,灵虫石像（家具）,脊骨王座（家具）,掠影无迹（背部挂件）,荒原切（腰部挂件）,游空竹翼（背部挂件）,天乙玄晶（110级）"),
+            ("河阳之战", "爆炸（头顶表情）,北拒风狼（家具）,百战同心（家具）,云鹤报捷（玩具）,玄域辟甲·头饰（马具）,玄域辟甲·鞍饰（马具）,玄域辟甲·足饰（马具）,玄域辟甲（马具）,扇风耳（宠物）,墨言（特殊背部）,天乙玄晶（110级）"),
             ("西津渡", "卯金修德（背部挂件）,相思尽（腰部挂件）,比翼剪（背部挂件）,静子（宠物）,泽心龙头像（家具）,焚金阙（外观）,赤发狻猊（头饰）,太一玄晶（120级）"),
             ("武狱黑牢", "驭己刃（腰部挂件）,象心灵犀（玩具）,心定（头饰）,幽兰引芳（脚印）,武氏挂旗（家具）,白鬼血泣（披风）,太一玄晶（120级）"),
             ("九老洞", "武圣（背部挂件）,不渡（特殊腰部）,灵龟·卜逆（奇趣坐骑）,朱雀·灼（家具）,青龙·木（家具）,麒麟·祝瑞（宠物）,幻月（特殊腰部）,太一玄晶（120级）"),
             ("冷龙峰", "涉海翎（帽子）,透骨香（腰部挂件）,转珠天轮（玩具）,鸷（宠物）,炽芒·邪锋（特殊腰部）,祆教神鸟像（家具）,太一玄晶（120级）")
         ]
         self.cursor.executemany('''
-            INSERT OR IGNORE INTO dungeons (name, special_drops) 
+            INSERT OR REPLACE INTO dungeons (name, special_drops) 
             VALUES (?, ?)
         ''', dungeons)
         self.conn.commit()
@@ -243,9 +253,10 @@ class JX3DungeonTracker:
                 if os.path.exists(default_db_path):
                     shutil.copy2(default_db_path, db_path)
             except Exception as e:
-                print(f"无法复制默认数据库: {e}")
+                print(f"Failed to copy default database: {e}")
         
         self.db = DatabaseManager(db_path)
+        self.new_record_ids = set()
         self.setup_ui()
         self.setup_events()
         self.load_data()
@@ -311,6 +322,8 @@ class JX3DungeonTracker:
         self.style.configure("TCombobox", padding=4)
         self.style.configure("TEntry", padding=4)
         self.style.configure("TLabelFrame", font=("PingFang SC", 10), padding=8, labelanchor="n")
+        
+        self.style.configure("NewRecord.Treeview", background="#e6f7ff")
 
     def create_main_ui(self):
         main_frame = ttk.Frame(self.root)
@@ -491,7 +504,7 @@ class JX3DungeonTracker:
         tree_frame = ttk.Frame(parent)
         tree_frame.grid(row=1, column=0, sticky="nsew")
         
-        columns = ("id", "dungeon", "time", "team_type", "lie_down", "total", "personal", "black_owner", "worker", "note")
+        columns = ("row_num", "dungeon", "time", "team_type", "lie_down", "total", "personal", "black_owner", "worker", "note")
         self.record_tree = ttk.Treeview(parent, columns=columns, show="headings", selectmode="extended", height=10)
         
         vsb = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=self.record_tree.yview)
@@ -509,6 +522,8 @@ class JX3DungeonTracker:
         self.setup_column_resizing(self.record_tree)
         self.setup_tooltip()
         self.setup_context_menu()
+        
+        self.record_tree.tag_configure('new_record', background='#e6f7ff')
 
     def build_search_controls(self, parent):
         search_row1 = ttk.Frame(parent)
@@ -565,7 +580,7 @@ class JX3DungeonTracker:
 
     def setup_tree_columns(self):
         columns = [
-            ("id", "ID", 35),
+            ("row_num", "序号", 35),
             ("dungeon", "副本名称", 100),
             ("time", "时间", 100),
             ("team_type", "团队类型", 70),
@@ -711,7 +726,7 @@ class JX3DungeonTracker:
         tree_frame = ttk.Frame(parent)
         tree_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
         
-        self.dungeon_tree = ttk.Treeview(tree_frame, columns=("id", "name", "drops"), show="headings", height=19)
+        self.dungeon_tree = ttk.Treeview(tree_frame, columns=("name", "drops"), show="headings", height=19)
         
         vsb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.dungeon_tree.yview)
         hsb = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=self.dungeon_tree.xview)
@@ -725,7 +740,6 @@ class JX3DungeonTracker:
         tree_frame.rowconfigure(0, weight=1)
         
         columns = [
-            ("id", "ID", 40),
             ("name", "副本名称", 120),
             ("drops", "特殊掉落", 150)
         ]
@@ -814,6 +828,7 @@ class JX3DungeonTracker:
         self.load_dungeon_presets()
         self.update_stats()
         self.load_black_owner_options()
+        self.clear_new_record_highlights()
 
     def load_dungeon_options(self):
         dungeons = [row[0] for row in self.db.execute_query("SELECT name FROM dungeons")]
@@ -834,22 +849,37 @@ class JX3DungeonTracker:
         records = self.db.execute_query('''
             SELECT r.id, d.name, strftime('%Y-%m-%d %H:%M', r.time), 
                    r.team_type, r.lie_down_count, r.total_gold, 
-                   r.personal_gold, r.black_owner, r.worker, r.note
+                   r.personal_gold, r.black_owner, r.worker, r.note, r.is_new
             FROM records r
             JOIN dungeons d ON r.dungeon_id = d.id
             ORDER BY r.time DESC
         ''')
         
+        total_records = len(records)
+        row_num = total_records
+        
         for row in records:
             note = row[9] or ""
             if len(note) > 15:
                 note = note[:15] + "..."
-            self.record_tree.insert("", "end", values=row[:9] + (note,))
+            
+            tags = ()
+            if row[10] == 1:
+                tags = ("new_record",)
+                self.new_record_ids.add(row[0])
+            
+            self.record_tree.insert("", "end", values=(row_num, row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], note), tags=tags)
+            row_num -= 1
+
+    def clear_new_record_highlights(self):
+        self.db.execute_update("UPDATE records SET is_new = 0 WHERE is_new = 1")
+        for item in self.record_tree.get_children():
+            self.record_tree.item(item, tags=())
 
     def load_dungeon_presets(self):
         self.dungeon_tree.delete(*self.dungeon_tree.get_children())
-        for row in self.db.execute_query("SELECT id, name, special_drops FROM dungeons"):
-            self.dungeon_tree.insert("", "end", values=row)
+        for row in self.db.execute_query("SELECT name, special_drops FROM dungeons"):
+            self.dungeon_tree.insert("", "end", values=(row[0], row[1]))
 
     def load_column_widths(self):
         trees = [
@@ -971,8 +1001,8 @@ class JX3DungeonTracker:
             INSERT INTO records (
                 dungeon_id, trash_gold, iron_gold, other_gold, special_auctions, 
                 total_gold, black_owner, worker, time, team_type, lie_down_count, 
-                fine_gold, subsidy_gold, personal_gold, note
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                fine_gold, subsidy_gold, personal_gold, note, is_new
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
         ''', (
             dungeon_id,
             GoldCalculator.safe_int(self.trash_gold_var.get()),
@@ -1003,42 +1033,45 @@ class JX3DungeonTracker:
             messagebox.showwarning("提示", "请选择一条记录")
             return
             
-        record_id = self.record_tree.item(selected[0], 'values')[0]
+        values = self.record_tree.item(selected[0], 'values')
+        dungeon_name = values[1]
+        time_str = values[2]
+        
         record = self.db.execute_query('''
-            SELECT d.name, r.trash_gold, r.iron_gold, r.other_gold, r.special_auctions, 
+            SELECT r.id, d.name, r.trash_gold, r.iron_gold, r.other_gold, r.special_auctions, 
                    r.total_gold, r.black_owner, r.worker, r.time, r.team_type, r.lie_down_count, 
                    r.fine_gold, r.subsidy_gold, r.personal_gold, r.note
             FROM records r
             JOIN dungeons d ON r.dungeon_id = d.id
-            WHERE r.id = ?
-        ''', (record_id,))
+            WHERE d.name = ? AND r.time LIKE ?
+        ''', (dungeon_name, f"{time_str}%"))
         
         if not record:
             messagebox.showerror("错误", "找不到记录")
             return
             
         r = record[0]
-        self.dungeon_var.set(r[0])
-        self.trash_gold_var.set(str(r[1]) if r[1] != 0 else "")
-        self.iron_gold_var.set(str(r[2]) if r[2] != 0 else "")
-        self.other_gold_var.set(str(r[3]) if r[3] != 0 else "")
-        self.total_gold_var.set(str(r[5]))
-        self.black_owner_var.set(r[6] or "")
-        self.worker_var.set(r[7] or "")
-        self.team_type_var.set(r[9])
-        self.lie_down_var.set(str(r[10]) if r[10] != 0 else "")
-        self.fine_gold_var.set(str(r[11]) if r[11] != 0 else "")
-        self.subsidy_gold_var.set(str(r[12]) if r[12] != 0 else "")
-        self.personal_gold_var.set(str(r[13]))
-        self.note_var.set(r[14] or "")
+        self.dungeon_var.set(r[1])
+        self.trash_gold_var.set(str(r[2]) if r[2] != 0 else "")
+        self.iron_gold_var.set(str(r[3]) if r[3] != 0 else "")
+        self.other_gold_var.set(str(r[4]) if r[4] != 0 else "")
+        self.total_gold_var.set(str(r[6]))
+        self.black_owner_var.set(r[7] or "")
+        self.worker_var.set(r[8] or "")
+        self.team_type_var.set(r[10])
+        self.lie_down_var.set(str(r[11]) if r[11] != 0 else "")
+        self.fine_gold_var.set(str(r[12]) if r[12] != 0 else "")
+        self.subsidy_gold_var.set(str(r[13]) if r[13] != 0 else "")
+        self.personal_gold_var.set(str(r[14]))
+        self.note_var.set(r[15] or "")
         
         self.special_tree.clear()
-        special_auctions = json.loads(r[4]) if r[4] else []
+        special_auctions = json.loads(r[5]) if r[5] else []
         for item in special_auctions:
             self.special_tree.add_item(item['item'], item['price'])
         self.special_total_var.set(str(self.special_tree.calculate_total()))
         
-        self.current_edit_id = record_id
+        self.current_edit_id = r[0]
         self.add_btn.configure(state=tk.DISABLED)
         self.edit_btn.configure(state=tk.DISABLED)
         self.update_btn.configure(state=tk.NORMAL)
@@ -1151,7 +1184,7 @@ class JX3DungeonTracker:
         sql = '''
             SELECT r.id, d.name, strftime('%Y-%m-%d %H:%M', r.time), 
                    r.team_type, r.lie_down_count, r.total_gold, 
-                   r.personal_gold, r.black_owner, r.worker, r.note
+                   r.personal_gold, r.black_owner, r.worker, r.note, r.is_new
             FROM records r
             JOIN dungeons d ON r.dungeon_id = d.id
         '''
@@ -1159,11 +1192,21 @@ class JX3DungeonTracker:
             sql += " WHERE " + " AND ".join(conditions)
         sql += " ORDER BY r.time DESC"
         
-        for row in self.db.execute_query(sql, params):
+        records = self.db.execute_query(sql, params)
+        total_records = len(records)
+        row_num = total_records
+        
+        for row in records:
             note = row[9] or ""
             if len(note) > 15:
                 note = note[:15] + "..."
-            self.record_tree.insert("", "end", values=row[:9] + (note,))
+            
+            tags = ()
+            if row[10] == 1:
+                tags = ("new_record",)
+            
+            self.record_tree.insert("", "end", values=(row_num, row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], note), tags=tags)
+            row_num -= 1
 
     def validate_date(self, date_str):
         if not date_str:
@@ -1202,8 +1245,19 @@ class JX3DungeonTracker:
             return
             
         for item in selected:
-            record_id = self.record_tree.item(item, 'values')[0]
-            self.db.execute_update("DELETE FROM records WHERE id=?", (record_id,))
+            values = self.record_tree.item(item, 'values')
+            dungeon_name = values[1]
+            time_str = values[2]
+            
+            result = self.db.execute_query('''
+                SELECT r.id FROM records r
+                JOIN dungeons d ON r.dungeon_id = d.id
+                WHERE d.name = ? AND r.time LIKE ?
+            ''', (dungeon_name, f"{time_str}%"))
+            
+            if result:
+                record_id = result[0][0]
+                self.db.execute_update("DELETE FROM records WHERE id=?", (record_id,))
             
         self.load_dungeon_records()
         self.update_stats()
@@ -1220,7 +1274,21 @@ class JX3DungeonTracker:
             
         item = self.record_tree.item(row_id)
         col_name = self.record_tree.heading(col_id)["text"]
-        record_id = item['values'][0]
+        values = item['values']
+        
+        dungeon_name = values[1]
+        time_str = values[2]
+        
+        result = self.db.execute_query('''
+            SELECT r.id FROM records r
+            JOIN dungeons d ON r.dungeon_id = d.id
+            WHERE d.name = ? AND r.time LIKE ?
+        ''', (dungeon_name, f"{time_str}%"))
+        
+        if not result:
+            return
+            
+        record_id = result[0][0]
         
         if col_name == "团队总工资":
             result = self.db.execute_query('''
@@ -1323,7 +1391,7 @@ class JX3DungeonTracker:
             FROM records
             WHERE time >= ?
             GROUP BY week
-            ORDER BY week
+            ORDER by week
         ''', (start_date.strftime("%Y-%m-%d"),))
         
         if not results:
@@ -1362,8 +1430,8 @@ class JX3DungeonTracker:
             return
             
         values = self.dungeon_tree.item(selected[0], 'values')
-        self.preset_name_var.set(values[1])
-        self.preset_drops_var.set(values[2])
+        self.preset_name_var.set(values[0])
+        self.preset_drops_var.set(values[1])
 
     def delete_dungeon(self):
         selected = self.dungeon_tree.selection()
@@ -1372,7 +1440,13 @@ class JX3DungeonTracker:
             return
             
         values = self.dungeon_tree.item(selected[0], 'values')
-        dungeon_id, dungeon_name = values[0], values[1]
+        dungeon_name = values[0]
+        
+        result = self.db.execute_query("SELECT id FROM dungeons WHERE name=?", (dungeon_name,))
+        if not result:
+            return
+            
+        dungeon_id = result[0][0]
         
         count = self.db.execute_query("SELECT COUNT(*) FROM records WHERE dungeon_id=?", (dungeon_id,))[0][0]
         if count > 0:
@@ -1444,35 +1518,75 @@ class JX3DungeonTracker:
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             
+            imported_count = 0
+            skipped_count = 0
+            
             if 'dungeons' in data:
                 for dungeon in data['dungeons']:
-                    self.db.execute_update('''
-                        INSERT OR IGNORE INTO dungeons (name, special_drops) VALUES (?, ?)
-                    ''', (dungeon['name'], dungeon['special_drops']))
+                    existing = self.db.execute_query("SELECT id FROM dungeons WHERE name=?", (dungeon['name'],))
+                    if not existing:
+                        self.db.execute_update('''
+                            INSERT INTO dungeons (name, special_drops) VALUES (?, ?)
+                        ''', (dungeon['name'], dungeon['special_drops']))
             
             if 'records' in data:
                 for record in data['records']:
                     result = self.db.execute_query("SELECT id FROM dungeons WHERE name=?", (record['dungeon'],))
-                    if result:
-                        dungeon_id = result[0][0]
-                        self.db.execute_update('''
-                            INSERT INTO records (dungeon_id, trash_gold, iron_gold, other_gold, 
-                                special_auctions, total_gold, black_owner, worker, time, 
-                                team_type, lie_down_count, fine_gold, subsidy_gold, personal_gold, note)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ''', (
-                            dungeon_id, record['trash_gold'], record['iron_gold'], record['other_gold'],
-                            json.dumps(record['special_auctions'], ensure_ascii=False),
-                            record['total_gold'], record['black_owner'], record['worker'], record['time'],
-                            record['team_type'], record['lie_down_count'], record['fine_gold'],
-                            record['subsidy_gold'], record['personal_gold'], record.get('note', '')
-                        ))
+                    if not result:
+                        continue
+                    
+                    dungeon_id = result[0][0]
+                    
+                    existing_record = self.db.execute_query('''
+                        SELECT id FROM records 
+                        WHERE dungeon_id=? AND time=? AND total_gold=?
+                        AND COALESCE(black_owner, '') = COALESCE(?, '')
+                        AND COALESCE(worker, '') = COALESCE(?, '')
+                    ''', (
+                        dungeon_id, 
+                        record['time'], 
+                        record['total_gold'],
+                        record.get('black_owner', '') or '',
+                        record.get('worker', '') or ''
+                    ))
+                    
+                    if existing_record:
+                        skipped_count += 1
+                        continue
+                    
+                    self.db.execute_update('''
+                        INSERT INTO records (dungeon_id, trash_gold, iron_gold, other_gold, 
+                            special_auctions, total_gold, black_owner, worker, time, 
+                            team_type, lie_down_count, fine_gold, subsidy_gold, personal_gold, note, is_new)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                    ''', (
+                        dungeon_id, 
+                        record['trash_gold'], 
+                        record['iron_gold'], 
+                        record['other_gold'],
+                        json.dumps(record['special_auctions'], ensure_ascii=False),
+                        record['total_gold'], 
+                        record.get('black_owner', '') or None, 
+                        record.get('worker', '') or None, 
+                        record['time'],
+                        record['team_type'], 
+                        record['lie_down_count'], 
+                        record['fine_gold'],
+                        record['subsidy_gold'], 
+                        record['personal_gold'], 
+                        record.get('note', '') or ''
+                    ))
+                    imported_count += 1
             
             self.load_dungeon_records()
             self.update_stats()
             self.load_dungeon_options()
             self.load_black_owner_options()
-            messagebox.showinfo("成功", "数据导入完成")
+            
+            message = f"数据导入完成\n成功导入: {imported_count} 条记录\n跳过重复: {skipped_count} 条记录"
+            if imported_count > 0:
+                message += "\n\n新增记录已高亮显示，下次打开应用后将取消高亮"
+            messagebox.showinfo("成功", message)
         except Exception as e:
             messagebox.showerror("错误", f"导入数据失败: {str(e)}")
 
@@ -1493,6 +1607,7 @@ class JX3DungeonTracker:
                    r.lie_down_count, r.fine_gold, r.subsidy_gold, r.personal_gold, r.note
             FROM records r
             JOIN dungeons d ON r.dungeon_id = d.id
+            ORDER BY r.time DESC
         '''):
             data['records'].append({
                 "dungeon": row[0], "trash_gold": row[1], "iron_gold": row[2], "other_gold": row[3],
@@ -1520,6 +1635,7 @@ class JX3DungeonTracker:
         self.search_worker_combo['values'] = workers
 
     def on_close(self):
+        self.clear_new_record_highlights()
         self.save_column_widths()
         self.db.close()
         self.root.destroy()
