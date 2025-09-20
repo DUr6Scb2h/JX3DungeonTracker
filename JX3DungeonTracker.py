@@ -10,6 +10,16 @@ import platform
 import shutil
 import locale
 
+# 设置缩放因子
+SCALE_FACTOR = 1
+
+# 延迟导入matplotlib，减少启动时间
+MATPLOTLIB_AVAILABLE = False
+plt = None
+FigureCanvasTkAgg = None
+np = None
+mdates = None
+
 try:
     import matplotlib
     import matplotlib.pyplot as plt
@@ -19,13 +29,10 @@ try:
     import matplotlib.dates as mdates
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
-    plt = None
-    FigureCanvasTkAgg = None
-    np = None
-    mdates = None
-    MATPLOTLIB_AVAILABLE = False
+    pass
 
 def resource_path(relative_path):
+    """获取资源文件的绝对路径"""
     try:
         base_path = sys._MEIPASS
     except Exception:
@@ -33,6 +40,7 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 def get_app_data_path():
+    """获取应用数据目录"""
     if platform.system() == "Windows":
         app_data = os.getenv('APPDATA')
         app_dir = os.path.join(app_data, "JX3DungeonTracker")
@@ -45,6 +53,7 @@ def get_app_data_path():
     return app_dir
 
 def check_dependencies():
+    """检查依赖库"""
     missing = []
     try:
         import matplotlib
@@ -57,6 +66,7 @@ def check_dependencies():
     return missing
 
 def get_current_time():
+    """获取当前时间字符串"""
     try:
         now = datetime.datetime.now()
         return now.strftime("%Y-%m-%d %H:%M:%S")
@@ -65,19 +75,44 @@ def get_current_time():
         return now.strftime("%Y-%m-%d %H:%M:%S")
 
 class DatabaseManager:
+    """数据库管理类"""
     
     def __init__(self, db_path):
+        # 确保数据库目录存在
         db_dir = os.path.dirname(db_path)
         if db_dir and not os.path.exists(db_dir):
             os.makedirs(db_dir, exist_ok=True)
             
-        self.conn = sqlite3.connect(db_path)
+        # 连接数据库
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.cursor = self.conn.cursor()
+        
+        # 启用外键约束
+        self.cursor.execute("PRAGMA foreign_keys = ON")
+        
+        # 初始化表和升级数据库
         self.initialize_tables()
         self.load_preset_dungeons()
         self.upgrade_database()
+        
+        print(f"数据库管理器已初始化 - 路径: {db_path}")
+        
+        # 检查数据库完整性
+        self.check_integrity()
+    
+    def check_integrity(self):
+        """检查数据库完整性"""
+        tables = self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        print(f"数据库中的表: {[table[0] for table in tables]}")
+        
+        # 检查各表的记录数量
+        for table in ['dungeons', 'records']:
+            count = self.cursor.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            print(f"{table}表中的记录数量: {count}")
 
     def initialize_tables(self):
+        """初始化数据库表结构"""
+        # 创建副本表
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS dungeons (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,6 +120,8 @@ class DatabaseManager:
                 special_drops TEXT
             )
         ''')
+        
+        # 创建记录表
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,29 +140,62 @@ class DatabaseManager:
                 subsidy_gold INTEGER DEFAULT 0,
                 personal_gold INTEGER DEFAULT 0,
                 note TEXT DEFAULT '',
-                is_new INTEGER DEFAULT 0
+                is_new INTEGER DEFAULT 0,
+                FOREIGN KEY (dungeon_id) REFERENCES dungeons (id)
             )
         ''')
+        
+        # 创建列宽存储表
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS column_widths (
                 tree_name TEXT PRIMARY KEY,
                 widths TEXT
             )
         ''')
+        
+        # 创建窗口状态存储表
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS window_state (
+                width INTEGER,
+                height INTEGER,
+                maximized INTEGER DEFAULT 0,
+                x INTEGER,
+                y INTEGER
+            )
+        ''')
+        
         self.conn.commit()
+        print("数据库表结构已初始化")
 
     def upgrade_database(self):
+        """升级数据库结构"""
         try:
+            # 检查是否已存在is_new列
             self.cursor.execute("PRAGMA table_info(records)")
             columns = [column[1] for column in self.cursor.fetchall()]
             
             if 'is_new' not in columns:
                 self.cursor.execute("ALTER TABLE records ADD COLUMN is_new INTEGER DEFAULT 0")
-                self.conn.commit()
+                
+            # 检查window_state表是否存在
+            self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='window_state'")
+            if not self.cursor.fetchone():
+                self.cursor.execute('''
+                    CREATE TABLE window_state (
+                        width INTEGER,
+                        height INTEGER,
+                        maximized INTEGER DEFAULT 0,
+                        x INTEGER,
+                        y INTEGER
+                    )
+                ''')
+                
+            self.conn.commit()
         except Exception as e:
             print(f"Database upgrade failed: {e}")
 
     def load_preset_dungeons(self):
+        """加载预设副本"""
         dungeons = [
             ("狼牙堡·狼神殿", "阿豪（宠物）,遗忘的书函（外观）,醉月玄晶（95级）"),
             ("敖龙岛", "赤纹野正宗（腰部挂件）,隐狐匿踪（特殊面部）,木木（宠物）,星云踏月骓（普通坐骑）,归墟玄晶（100级）"),
@@ -139,36 +209,51 @@ class DatabaseManager:
             ("九老洞", "武圣（背部挂件）,不渡（特殊腰部）,灵龟·卜逆（奇趣坐骑）,朱雀·灼（家具）,青龙·木（家具）,麒麟·祝瑞（宠物）,幻月（特殊腰部）,太一玄晶（120级）"),
             ("冷龙峰", "涉海翎（帽子）,透骨香（腰部挂件）,转珠天轮（玩具）,鸷（宠物）,炽芒·邪锋（特殊腰部）,祆教神鸟像（家具）,太一玄晶（120级）")
         ]
+        
         self.cursor.executemany('''
             INSERT OR IGNORE INTO dungeons (name, special_drops) 
             VALUES (?, ?)
         ''', dungeons)
         self.conn.commit()
+        print("预设副本已加载")
 
     def execute_query(self, query, params=()):
+        """执行查询语句"""
         self.cursor.execute(query, params)
         return self.cursor.fetchall()
 
     def execute_update(self, query, params=()):
+        """执行更新语句"""
         self.cursor.execute(query, params)
         self.conn.commit()
 
     def close(self):
+        """关闭数据库连接"""
         self.conn.commit()
         self.conn.close()
 
 class SpecialItemsTree:
+    """特殊物品树形视图"""
     def __init__(self, parent):
-        self.tree = ttk.Treeview(parent, columns=("item", "price"), show="headings", height=3, selectmode="browse")
+        self.tree = ttk.Treeview(parent, columns=("item", "price"), show="headings", 
+                                height=int(3*SCALE_FACTOR), selectmode="browse")
         self.tree.heading("item", text="物品", anchor="center")
         self.tree.heading("price", text="金额", anchor="center")
-        self.tree.column("item", width=120, anchor=tk.CENTER)
-        self.tree.column("price", width=60, anchor=tk.CENTER)
+        self.tree.column("item", width=int(120*SCALE_FACTOR), anchor=tk.CENTER)
+        self.tree.column("price", width=int(60*SCALE_FACTOR), anchor=tk.CENTER)
         
+        # 设置Treeview样式
+        style = ttk.Style()
+        style.configure("Special.Treeview", font=("PingFang SC", int(9*SCALE_FACTOR)), 
+                       rowheight=int(24*SCALE_FACTOR))
+        self.tree.configure(style="Special.Treeview")
+        
+        # 添加滚动条
         vsb = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=self.tree.yview)
         hsb = ttk.Scrollbar(parent, orient=tk.HORIZONTAL, command=self.tree.xview)
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         
+        # 布局
         self.tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
@@ -177,12 +262,15 @@ class SpecialItemsTree:
         parent.rowconfigure(0, weight=1)
 
     def clear(self):
+        """清空所有项"""
         self.tree.delete(*self.tree.get_children())
 
     def add_item(self, item, price):
+        """添加物品"""
         self.tree.insert("", "end", values=(item, price))
 
     def get_items(self):
+        """获取所有物品"""
         items = []
         for child in self.tree.get_children():
             values = self.tree.item(child, 'values')
@@ -190,6 +278,7 @@ class SpecialItemsTree:
         return items
 
     def calculate_total(self):
+        """计算总金额"""
         total = 0
         for child in self.tree.get_children():
             values = self.tree.item(child, 'values')
@@ -200,8 +289,10 @@ class SpecialItemsTree:
         return total
 
 class GoldCalculator:
+    """金币计算工具类"""
     @staticmethod
     def safe_int(value):
+        """安全转换为整数"""
         try:
             return int(value) if value != "" else 0
         except ValueError:
@@ -209,89 +300,110 @@ class GoldCalculator:
 
     @classmethod
     def calculate_total(cls, trash, iron, other, special):
+        """计算总金额"""
         return cls.safe_int(trash) + cls.safe_int(iron) + cls.safe_int(other) + cls.safe_int(special)
 
     @classmethod
     def calculate_difference(cls, total, trash, iron, other, special):
+        """计算差额"""
         calculated = cls.safe_int(trash) + cls.safe_int(iron) + cls.safe_int(other) + cls.safe_int(special)
         return cls.safe_int(total) - calculated
 
 class JX3DungeonTracker:
-    def auto_resize_column(self, tree, column_id):
-        font = tkFont.Font(family="PingFang SC", size=10)
-        heading_text = tree.heading(column_id)["text"]
-        max_width = font.measure(heading_text) + 20
-        
-        for item in tree.get_children():
-            cell_value = tree.set(item, column_id)
-            if cell_value:
-                cell_width = font.measure(cell_value) + 20
-                if cell_width > max_width:
-                    max_width = cell_width
-        
-        tree.column(column_id, width=max_width)
-
-    def setup_column_resizing(self, tree):
-        columns = tree["columns"]
-        for col in columns:
-            tree.heading(col, command=lambda c=col: self.auto_resize_column(tree, c))
-
+    """主应用程序类"""
+    
     def __init__(self, root):
         self.root = root
         self.root.title("JX3DungeonTracker - 剑网3副本记录工具")
         
+        # 设置本地化
         try:
             locale.setlocale(locale.LC_TIME, '')
         except:
             pass 
         
+        # 初始化数据库
         app_data_dir = get_app_data_path()
         db_path = os.path.join(app_data_dir, 'jx3_dungeon.db')
         
+        print(f"应用数据目录: {app_data_dir}")
+        print(f"数据库路径: {db_path}")
+        print(f"数据库文件是否存在: {os.path.exists(db_path)}")
+        
         os.makedirs(app_data_dir, exist_ok=True)
         
-        if not os.path.exists(db_path):
-            try:
-                default_db_path = resource_path('jx3_dungeon.db')
-                if os.path.exists(default_db_path):
-                    shutil.copy2(default_db_path, db_path)
-                    print(f"Copied default database to: {db_path}")
-                else:
-                    print(f"Creating new database at: {db_path}")
-            except Exception as e:
-                print(f"Failed to copy default database: {e}")
-        
+        # 数据库初始化
         try:
             self.db = DatabaseManager(db_path)
-            print(f"Database initialized at: {db_path}")
+            print(f"数据库已初始化: {db_path}")
+            
+            # 测试数据库连接
+            test_result = self.db.execute_query("SELECT COUNT(*) FROM records")
+            print(f"数据库中的记录数量: {test_result[0][0]}")
+            
         except Exception as e:
             messagebox.showerror("数据库错误", f"无法初始化数据库: {str(e)}")
             self.root.destroy()
             return
         
+        # 初始化变量
         self.new_record_ids = set()
+        self.cached_dungeons = None
+        self.cached_owners = None
+        self.cached_workers = None
+        
+        # 设置UI和事件
         self.setup_ui()
         self.setup_events()
         self.load_data()
+        
+        # 设置关闭事件
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def setup_ui(self):
+        """设置用户界面"""
         self.setup_window()
         self.setup_variables()
         self.setup_styles()
         self.create_main_ui()
 
     def setup_window(self):
-        width, height = 1600, 900
-        screen_width = self.root.winfo_screenwidth()
-        screen_height = self.root.winfo_screenheight()
-        x = (screen_width - width) // 2
-        y = (screen_height - height) // 2
-        self.root.geometry(f"{width}x{height}+{x}+{y}")
+        """设置窗口属性"""
+        # 从数据库加载保存的窗口状态
+        result = self.db.execute_query("SELECT width, height, maximized, x, y FROM window_state")
+        if result:
+            width, height, maximized, x, y = result[0]
+            # 确保窗口大小不会超出屏幕
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            width = min(width, screen_width)
+            height = min(height, screen_height)
+            
+            # 设置窗口位置
+            if x is not None and y is not None:
+                x = max(0, min(x, screen_width - width))
+                y = max(0, min(y, screen_height - height))
+                self.root.geometry(f"{width}x{height}+{x}+{y}")
+            else:
+                self.root.geometry(f"{width}x{height}")
+            
+            # 恢复最大化状态
+            if maximized:
+                self.root.state('zoomed')
+        else:
+            # 默认窗口大小和位置
+            width, height = int(1600*SCALE_FACTOR), int(900*SCALE_FACTOR)
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            x = (screen_width - width) // 2
+            y = (screen_height - height) // 2
+            self.root.geometry(f"{width}x{height}+{x}+{y}")
+        
         self.root.configure(bg="#f5f5f7")
-        self.root.minsize(1024, 600)
+        self.root.minsize(int(1024*SCALE_FACTOR), int(600*SCALE_FACTOR))
 
     def setup_variables(self):
+        """设置界面变量"""
         self.trash_gold_var = tk.StringVar(value="")
         self.iron_gold_var = tk.StringVar(value="")
         self.other_gold_var = tk.StringVar(value="")
@@ -321,42 +433,52 @@ class JX3DungeonTracker:
         self.preset_name_var = tk.StringVar()
 
     def setup_styles(self):
+        """设置界面样式"""
         self.style = ttk.Style()
         self.style.theme_use("clam")
         self.style.configure(".", background="#f5f5f7", foreground="#333")
         self.style.configure("TFrame", background="#f5f5f7")
-        self.style.configure("TLabel", background="#f5f5f7", font=("PingFang SC", 10))
-        self.style.configure("TButton", font=("PingFang SC", 10), padding=6, background="#e6e6e6")
+        self.style.configure("TLabel", background="#f5f5f7", font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.style.configure("TButton",
+                            font=("PingFang SC", int(10*SCALE_FACTOR)),
+                            padding=int(6*SCALE_FACTOR),
+                            background="#e6e6e6")
         self.style.map("TButton", background=[("active", "#d6d6d6")])
-        self.style.configure("Treeview", font=("PingFang SC", 9), rowheight=24)
-        self.style.configure("Treeview.Heading", font=("PingFang SC", 10), anchor="center")
+        self.style.configure("Treeview", font=("PingFang SC", int(9*SCALE_FACTOR)), rowheight=int(24*SCALE_FACTOR))
+        self.style.configure("Treeview.Heading", font=("PingFang SC", int(10*SCALE_FACTOR)), anchor="center")
         self.style.configure("TNotebook", background="#f5f5f7", borderwidth=0)
-        self.style.configure("TNotebook.Tab", font=("PingFang SC", 10), padding=[10, 4])
-        self.style.configure("TCombobox", padding=4)
-        self.style.configure("TEntry", padding=4)
-        self.style.configure("TLabelFrame", font=("PingFang SC", 10), padding=8, labelanchor="n")
+        self.style.configure("TNotebook.Tab", font=("PingFang SC", int(10*SCALE_FACTOR)), padding=[int(10*SCALE_FACTOR), int(4*SCALE_FACTOR)])
+        self.style.configure("TCombobox", font=("PingFang SC", int(10*SCALE_FACTOR)), padding=int(4*SCALE_FACTOR))
+        self.style.configure("TEntry", font=("PingFang SC", int(10*SCALE_FACTOR)), padding=int(4*SCALE_FACTOR))
+        self.style.configure("TLabelFrame", font=("PingFang SC", int(10*SCALE_FACTOR)), padding=int(8*SCALE_FACTOR), labelanchor="n")
         
         self.style.configure("NewRecord.Treeview", background="#e6f7ff")
+        
+        # 设置下拉列表字体
+        self.root.option_add("*TCombobox*Listbox*Font", ("PingFang SC", int(10*SCALE_FACTOR)))
 
     def create_main_ui(self):
+        """创建主界面"""
         main_frame = ttk.Frame(self.root)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=int(10*SCALE_FACTOR), pady=int(10*SCALE_FACTOR))
         
+        # 标题栏
         title_frame = ttk.Frame(main_frame)
-        title_frame.pack(fill=tk.X, pady=(0, 8))
+        title_frame.pack(fill=tk.X, pady=(0, int(8*SCALE_FACTOR)))
         title_frame.columnconfigure(0, weight=1)
         title_frame.columnconfigure(1, weight=0)
         
         ttk.Label(title_frame, text="JX3DungeonTracker - 剑网3副本记录工具", 
-                 font=("PingFang SC", 16, "bold"), anchor="w"
-        ).grid(row=0, column=0, sticky="w", padx=10)
+                 font=("PingFang SC", int(16*SCALE_FACTOR), "bold"), anchor="w"
+        ).grid(row=0, column=0, sticky="w", padx=int(10*SCALE_FACTOR))
         
         ttk.Label(title_frame, textvariable=self.time_var, 
-                 font=("PingFang SC", 12), anchor="e"
+                 font=("PingFang SC", int(12*SCALE_FACTOR)), anchor="e"
         ).grid(row=0, column=1, sticky="e")
         
+        # 创建选项卡
         notebook = ttk.Notebook(main_frame)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=int(5*SCALE_FACTOR), pady=int(5*SCALE_FACTOR))
         
         record_frame = ttk.Frame(notebook)
         stats_frame = ttk.Frame(notebook)
@@ -366,160 +488,196 @@ class JX3DungeonTracker:
         notebook.add(stats_frame, text="数据总览")
         notebook.add(preset_frame, text="副本预设")
         
+        # 创建各个选项卡内容
         self.create_record_tab(record_frame)
         self.create_stats_tab(stats_frame)
         self.create_preset_tab(preset_frame)
 
     def create_record_tab(self, parent):
+        """创建记录选项卡"""
         pane = ttk.PanedWindow(parent, orient=tk.HORIZONTAL)
-        pane.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        pane.pack(fill=tk.BOTH, expand=True, padx=int(5*SCALE_FACTOR), pady=int(5*SCALE_FACTOR))
         
-        form_frame = ttk.LabelFrame(pane, text="副本记录管理", padding=8, width=350)
+        form_frame = ttk.LabelFrame(pane, text="副本记录管理", padding=int(8*SCALE_FACTOR), width=int(350*SCALE_FACTOR))
         self.build_record_form(form_frame)
         
-        list_frame = ttk.LabelFrame(pane, text="副本记录列表", padding=8)
+        list_frame = ttk.LabelFrame(pane, text="副本记录列表", padding=int(8*SCALE_FACTOR))
         self.build_record_list(list_frame)
         
         pane.add(form_frame, weight=1)
         pane.add(list_frame, weight=2)
 
     def build_record_form(self, parent):
+        """构建记录表单"""
+        # 副本选择
         dungeon_row = ttk.Frame(parent)
-        dungeon_row.pack(fill=tk.X, pady=3)
-        ttk.Label(dungeon_row, text="副本名称:").pack(side=tk.LEFT, padx=(0, 5))
-        self.dungeon_combo = ttk.Combobox(dungeon_row, textvariable=self.dungeon_var, width=25)
+        dungeon_row.pack(fill=tk.X, pady=int(3*SCALE_FACTOR))
+        ttk.Label(dungeon_row, text="副本名称:").pack(side=tk.LEFT, padx=(0, int(5*SCALE_FACTOR)))
+        self.dungeon_combo = ttk.Combobox(dungeon_row, textvariable=self.dungeon_var, 
+                                         width=int(25*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
         self.dungeon_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
         
-        special_frame = ttk.LabelFrame(parent, text="特殊掉落", padding=6)
-        special_frame.pack(fill=tk.BOTH, pady=(0, 5), expand=True)
+        # 特殊掉落区域
+        special_frame = ttk.LabelFrame(parent, text="特殊掉落", padding=int(6*SCALE_FACTOR))
+        special_frame.pack(fill=tk.BOTH, pady=(0, int(5*SCALE_FACTOR)), expand=True)
         
         tree_frame = ttk.Frame(special_frame)
-        tree_frame.pack(fill=tk.BOTH, expand=True, pady=3)
+        tree_frame.pack(fill=tk.BOTH, expand=True, pady=int(3*SCALE_FACTOR))
         self.special_tree = SpecialItemsTree(tree_frame)
         
+        # 添加特殊掉落控件
         add_special_frame = ttk.Frame(special_frame)
-        add_special_frame.pack(fill=tk.X, pady=(8, 0))
+        add_special_frame.pack(fill=tk.X, pady=(int(8*SCALE_FACTOR), 0))
         
-        ttk.Label(add_special_frame, text="物品:").grid(row=0, column=0, padx=(0, 5), sticky="w")
-        self.special_item_combo = ttk.Combobox(add_special_frame, textvariable=self.special_item_var, width=15)
-        self.special_item_combo.grid(row=0, column=1, padx=(0, 5), sticky="ew")
+        ttk.Label(add_special_frame, text="物品:").grid(row=0, column=0, padx=(0, int(5*SCALE_FACTOR)), sticky="w")
+        self.special_item_combo = ttk.Combobox(add_special_frame, textvariable=self.special_item_var, 
+                                              width=int(15*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.special_item_combo.grid(row=0, column=1, padx=(0, int(5*SCALE_FACTOR)), sticky="ew")
         
-        ttk.Label(add_special_frame, text="金额:").grid(row=0, column=2, padx=(5, 5), sticky="w")
-        self.special_price_entry = ttk.Entry(add_special_frame, textvariable=self.special_price_var, width=10)
-        self.special_price_entry.grid(row=0, column=3, padx=(0, 5), sticky="w")
+        ttk.Label(add_special_frame, text="金额:").grid(row=0, column=2, padx=(int(5*SCALE_FACTOR), int(5*SCALE_FACTOR)), sticky="w")
+        self.special_price_entry = ttk.Entry(add_special_frame, textvariable=self.special_price_var, 
+                                            width=int(10*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.special_price_entry.grid(row=0, column=3, padx=(0, int(5*SCALE_FACTOR)), sticky="w")
         
-        ttk.Button(add_special_frame, text="添加", width=6, command=self.add_special_item
-        ).grid(row=0, column=4, padx=(5, 0))
+        ttk.Button(add_special_frame, text="添加", width=int(6*SCALE_FACTOR), command=self.add_special_item
+        ).grid(row=0, column=4, padx=(int(5*SCALE_FACTOR), 0))
         add_special_frame.columnconfigure(1, weight=1)
         
-        team_frame = ttk.LabelFrame(parent, text="团队项目", padding=6)
-        team_frame.pack(fill=tk.X, pady=(0, 5))
+        # 团队项目
+        team_frame = ttk.LabelFrame(parent, text="团队项目", padding=int(6*SCALE_FACTOR))
+        team_frame.pack(fill=tk.X, pady=(0, int(5*SCALE_FACTOR)))
         self.build_team_fields(team_frame)
         
-        personal_frame = ttk.LabelFrame(parent, text="个人项目", padding=6)
-        personal_frame.pack(fill=tk.X, pady=(0, 5))
+        # 个人项目
+        personal_frame = ttk.LabelFrame(parent, text="个人项目", padding=int(6*SCALE_FACTOR))
+        personal_frame.pack(fill=tk.X, pady=(0, int(5*SCALE_FACTOR)))
         self.build_personal_fields(personal_frame)
         
-        info_frame = ttk.LabelFrame(parent, text="团队信息", padding=6)
-        info_frame.pack(fill=tk.X, pady=(0, 5))
+        # 团队信息
+        info_frame = ttk.LabelFrame(parent, text="团队信息", padding=int(6*SCALE_FACTOR))
+        info_frame.pack(fill=tk.X, pady=(0, int(5*SCALE_FACTOR)))
         self.build_info_fields(info_frame)
         
-        gold_frame = ttk.LabelFrame(parent, text="工资信息", padding=6)
-        gold_frame.pack(fill=tk.X, pady=(0, 5))
+        # 工资信息
+        gold_frame = ttk.LabelFrame(parent, text="工资信息", padding=int(6*SCALE_FACTOR))
+        gold_frame.pack(fill=tk.X, pady=(0, int(5*SCALE_FACTOR)))
         self.build_gold_fields(gold_frame)
         
+        # 按钮区域
         btn_frame = ttk.Frame(parent)
-        btn_frame.pack(fill=tk.X, pady=5)
+        btn_frame.pack(fill=tk.X, pady=int(5*SCALE_FACTOR))
         self.build_form_buttons(btn_frame)
 
     def build_team_fields(self, parent):
-        ttk.Label(parent, text="散件金额:").grid(row=0, column=0, padx=3, pady=2, sticky=tk.W)
-        self.trash_gold_entry = ttk.Entry(parent, textvariable=self.trash_gold_var, width=10)
-        self.trash_gold_entry.grid(row=0, column=1, padx=3, pady=2, sticky=tk.W)
+        """构建团队项目字段"""
+        ttk.Label(parent, text="散件金额:").grid(row=0, column=0, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
+        self.trash_gold_entry = ttk.Entry(parent, textvariable=self.trash_gold_var, 
+                                         width=int(10*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.trash_gold_entry.grid(row=0, column=1, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
         
-        ttk.Label(parent, text="小铁金额:").grid(row=0, column=2, padx=3, pady=2, sticky=tk.W)
-        self.iron_gold_entry = ttk.Entry(parent, textvariable=self.iron_gold_var, width=10)
-        self.iron_gold_entry.grid(row=0, column=3, padx=3, pady=2, sticky=tk.W)
+        ttk.Label(parent, text="小铁金额:").grid(row=0, column=2, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
+        self.iron_gold_entry = ttk.Entry(parent, textvariable=self.iron_gold_var, 
+                                        width=int(10*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.iron_gold_entry.grid(row=0, column=3, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
         
-        ttk.Label(parent, text="特殊金额:").grid(row=1, column=0, padx=3, pady=2, sticky=tk.W)
-        ttk.Label(parent, textvariable=self.special_total_var, width=10
-        ).grid(row=1, column=1, padx=3, pady=2, sticky=tk.W)
+        ttk.Label(parent, text="特殊金额:").grid(row=1, column=0, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
+        ttk.Label(parent, textvariable=self.special_total_var, width=int(10*SCALE_FACTOR), 
+                 font=("PingFang SC", int(10*SCALE_FACTOR))
+        ).grid(row=1, column=1, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
         
-        ttk.Label(parent, text="其他金额:").grid(row=1, column=2, padx=3, pady=2, sticky=tk.W)
-        self.other_gold_entry = ttk.Entry(parent, textvariable=self.other_gold_var, width=10)
-        self.other_gold_entry.grid(row=1, column=3, padx=3, pady=2, sticky=tk.W)
+        ttk.Label(parent, text="其他金额:").grid(row=1, column=2, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
+        self.other_gold_entry = ttk.Entry(parent, textvariable=self.other_gold_var, 
+                                         width=int(10*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.other_gold_entry.grid(row=1, column=3, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
 
     def build_personal_fields(self, parent):
-        ttk.Label(parent, text="补贴金额:").grid(row=0, column=0, padx=3, pady=2, sticky=tk.W)
-        self.subsidy_gold_entry = ttk.Entry(parent, textvariable=self.subsidy_gold_var, width=10)
-        self.subsidy_gold_entry.grid(row=0, column=1, padx=3, pady=2, sticky=tk.W)
+        """构建个人项目字段"""
+        ttk.Label(parent, text="补贴金额:").grid(row=0, column=0, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
+        self.subsidy_gold_entry = ttk.Entry(parent, textvariable=self.subsidy_gold_var, 
+                                           width=int(10*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.subsidy_gold_entry.grid(row=0, column=1, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
         
-        ttk.Label(parent, text="罚款金额:").grid(row=0, column=2, padx=3, pady=2, sticky=tk.W)
-        self.fine_gold_entry = ttk.Entry(parent, textvariable=self.fine_gold_var, width=10)
-        self.fine_gold_entry.grid(row=0, column=3, padx=3, pady=2, sticky=tk.W)
+        ttk.Label(parent, text="罚款金额:").grid(row=0, column=2, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
+        self.fine_gold_entry = ttk.Entry(parent, textvariable=self.fine_gold_var, 
+                                        width=int(10*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.fine_gold_entry.grid(row=0, column=3, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
 
     def build_info_fields(self, parent):
-        ttk.Label(parent, text="团队类型:").grid(row=0, column=0, padx=3, pady=2, sticky=tk.W)
+        """构建信息字段"""
+        ttk.Label(parent, text="团队类型:").grid(row=0, column=0, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
         self.team_type_combo = ttk.Combobox(parent, textvariable=self.team_type_var, 
-                                           values=["十人本", "二十五人本"], width=10, state="readonly")
-        self.team_type_combo.grid(row=0, column=1, padx=3, pady=2, sticky=tk.W)
+                                           values=["十人本", "二十五人本"], width=int(10*SCALE_FACTOR), 
+                                           state="readonly", font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.team_type_combo.grid(row=0, column=1, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
         self.team_type_combo.current(0)
         
-        ttk.Label(parent, text="躺拍人数:").grid(row=0, column=2, padx=3, pady=2, sticky=tk.W)
-        self.lie_down_entry = ttk.Entry(parent, textvariable=self.lie_down_var, width=6)
-        self.lie_down_entry.grid(row=0, column=3, padx=3, pady=2, sticky=tk.W)
+        ttk.Label(parent, text="躺拍人数:").grid(row=0, column=2, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
+        self.lie_down_entry = ttk.Entry(parent, textvariable=self.lie_down_var, 
+                                       width=int(6*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.lie_down_entry.grid(row=0, column=3, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
         
-        ttk.Label(parent, text="黑本:").grid(row=1, column=0, padx=3, pady=2, sticky=tk.W)
-        self.black_owner_combo = ttk.Combobox(parent, textvariable=self.black_owner_var, width=20)
-        self.black_owner_combo.grid(row=1, column=1, padx=3, pady=2, sticky=tk.W, columnspan=3)
+        ttk.Label(parent, text="黑本:").grid(row=1, column=0, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
+        self.black_owner_combo = ttk.Combobox(parent, textvariable=self.black_owner_var, 
+                                             width=int(20*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.black_owner_combo.grid(row=1, column=1, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W, columnspan=3)
         
-        ttk.Label(parent, text="打工仔:").grid(row=2, column=0, padx=3, pady=2, sticky=tk.W)
-        self.worker_combo = ttk.Combobox(parent, textvariable=self.worker_var, width=20)
-        self.worker_combo.grid(row=2, column=1, padx=3, pady=2, sticky=tk.W, columnspan=3)
+        ttk.Label(parent, text="打工仔:").grid(row=2, column=0, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
+        self.worker_combo = ttk.Combobox(parent, textvariable=self.worker_var, 
+                                        width=int(20*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.worker_combo.grid(row=2, column=1, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W, columnspan=3)
         
-        ttk.Label(parent, text="备注:").grid(row=3, column=0, padx=3, pady=2, sticky=tk.W)
-        self.note_entry = ttk.Entry(parent, textvariable=self.note_var, width=20)
-        self.note_entry.grid(row=3, column=1, padx=3, pady=2, sticky=tk.W, columnspan=3)
+        ttk.Label(parent, text="备注:").grid(row=3, column=0, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
+        self.note_entry = ttk.Entry(parent, textvariable=self.note_var, 
+                                   width=int(20*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.note_entry.grid(row=3, column=1, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W, columnspan=3)
 
     def build_gold_fields(self, parent):
-        ttk.Label(parent, text="团队总工资:").grid(row=0, column=0, padx=3, pady=2, sticky=tk.W)
-        self.total_gold_entry = ttk.Entry(parent, textvariable=self.total_gold_var, width=10)
-        self.total_gold_entry.grid(row=0, column=1, padx=3, pady=2, sticky=tk.W)
+        """构建工资字段"""
+        ttk.Label(parent, text="团队总工资:").grid(row=0, column=0, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
+        self.total_gold_entry = ttk.Entry(parent, textvariable=self.total_gold_var, 
+                                         width=int(10*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.total_gold_entry.grid(row=0, column=1, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
         
         self.difference_label = ttk.Label(parent, textvariable=self.difference_var, 
-                                         font=("PingFang SC", 9), foreground="#e74c3c")
-        self.difference_label.grid(row=0, column=2, padx=5, pady=2, sticky=tk.W)
+                                         font=("PingFang SC", int(9*SCALE_FACTOR)), foreground="#e74c3c")
+        self.difference_label.grid(row=0, column=2, padx=int(5*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
         
-        ttk.Label(parent, text="个人工资:").grid(row=1, column=0, padx=3, pady=2, sticky=tk.W)
-        self.personal_gold_entry = ttk.Entry(parent, textvariable=self.personal_gold_var, width=10)
-        self.personal_gold_entry.grid(row=1, column=1, padx=3, pady=2, sticky=tk.W)
+        ttk.Label(parent, text="个人工资:").grid(row=1, column=0, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
+        self.personal_gold_entry = ttk.Entry(parent, textvariable=self.personal_gold_var, 
+                                            width=int(10*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.personal_gold_entry.grid(row=1, column=1, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
 
     def build_form_buttons(self, parent):
-        self.add_btn = ttk.Button(parent, text="保存记录", command=self.add_record, width=10)
-        self.edit_btn = ttk.Button(parent, text="编辑记录", command=self.edit_record, width=10)
+        """构建表单按钮"""
+        self.add_btn = ttk.Button(parent, text="保存记录", command=self.validate_and_save, width=int(10*SCALE_FACTOR))
+        self.edit_btn = ttk.Button(parent, text="编辑记录", command=self.edit_record, width=int(10*SCALE_FACTOR))
         self.update_btn = ttk.Button(parent, text="更新记录", command=self.update_record, 
-                                   state=tk.DISABLED, width=10)
-        clear_btn = ttk.Button(parent, text="清空表单", command=self.clear_form, width=10)
+                                   state=tk.DISABLED, width=int(10*SCALE_FACTOR))
+        clear_btn = ttk.Button(parent, text="清空表单", command=self.clear_form, width=int(10*SCALE_FACTOR))
         
-        self.add_btn.grid(row=0, column=0, padx=2, sticky="ew")
-        self.edit_btn.grid(row=0, column=1, padx=2, sticky="ew")
-        self.update_btn.grid(row=0, column=2, padx=2, sticky="ew")
-        clear_btn.grid(row=0, column=3, padx=2, sticky="ew")
+        self.add_btn.grid(row=0, column=0, padx=int(2*SCALE_FACTOR), sticky="ew")
+        self.edit_btn.grid(row=0, column=1, padx=int(2*SCALE_FACTOR), sticky="ew")
+        self.update_btn.grid(row=0, column=2, padx=int(2*SCALE_FACTOR), sticky="ew")
+        clear_btn.grid(row=0, column=3, padx=int(2*SCALE_FACTOR), sticky="ew")
         
         for i in range(4):
             parent.columnconfigure(i, weight=1)
 
     def build_record_list(self, parent):
+        """构建记录列表"""
         search_frame = ttk.Frame(parent)
-        search_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 5))
+        search_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, int(5*SCALE_FACTOR)))
         self.build_search_controls(search_frame)
         
         tree_frame = ttk.Frame(parent)
         tree_frame.grid(row=1, column=0, sticky="nsew")
         
+        # 创建记录树
         columns = ("row_num", "dungeon", "time", "team_type", "lie_down", "total", "personal", "black_owner", "worker", "note")
-        self.record_tree = ttk.Treeview(parent, columns=columns, show="headings", selectmode="extended", height=10)
+        self.record_tree = ttk.Treeview(parent, columns=columns, show="headings", 
+                                       selectmode="extended", height=int(10*SCALE_FACTOR))
         
+        # 添加滚动条
         vsb = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=self.record_tree.yview)
         hsb = ttk.Scrollbar(parent, orient=tk.HORIZONTAL, command=self.record_tree.xview)
         self.record_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
@@ -531,78 +689,91 @@ class JX3DungeonTracker:
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(1, weight=1)
         
+        # 设置列
         self.setup_tree_columns()
         self.setup_column_resizing(self.record_tree)
         self.setup_tooltip()
         self.setup_context_menu()
         
+        # 设置新记录高亮样式
         self.record_tree.tag_configure('new_record', background='#e6f7ff')
 
     def build_search_controls(self, parent):
+        """构建搜索控件"""
         search_row1 = ttk.Frame(parent)
-        search_row1.pack(fill=tk.X, pady=2)
-        ttk.Label(search_row1, text="黑本:").pack(side=tk.LEFT, padx=(0, 3))
-        self.search_owner_combo = ttk.Combobox(search_row1, textvariable=self.search_owner_var, width=15)
-        self.search_owner_combo.pack(side=tk.LEFT, padx=(0, 8))
+        search_row1.pack(fill=tk.X, pady=int(2*SCALE_FACTOR))
+        ttk.Label(search_row1, text="黑本:").pack(side=tk.LEFT, padx=(0, int(3*SCALE_FACTOR)))
+        self.search_owner_combo = ttk.Combobox(search_row1, textvariable=self.search_owner_var, 
+                                              width=int(15*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.search_owner_combo.pack(side=tk.LEFT, padx=(0, int(8*SCALE_FACTOR)))
         
-        ttk.Label(search_row1, text="打工仔:").pack(side=tk.LEFT, padx=(5, 5))
-        self.search_worker_combo = ttk.Combobox(search_row1, textvariable=self.search_worker_var, width=15)
-        self.search_worker_combo.pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(search_row1, text="打工仔:").pack(side=tk.LEFT, padx=(int(5*SCALE_FACTOR), int(5*SCALE_FACTOR)))
+        self.search_worker_combo = ttk.Combobox(search_row1, textvariable=self.search_worker_var, 
+                                               width=int(15*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.search_worker_combo.pack(side=tk.LEFT, padx=(0, int(8*SCALE_FACTOR)))
         
         search_row2 = ttk.Frame(parent)
-        search_row2.pack(fill=tk.X, pady=2)
-        ttk.Label(search_row2, text="副本:").pack(side=tk.LEFT, padx=(0, 3))
-        self.search_dungeon_combo = ttk.Combobox(search_row2, textvariable=self.search_dungeon_var, width=15)
-        self.search_dungeon_combo.pack(side=tk.LEFT, padx=(0, 8))
+        search_row2.pack(fill=tk.X, pady=int(2*SCALE_FACTOR))
+        ttk.Label(search_row2, text="副本:").pack(side=tk.LEFT, padx=(0, int(3*SCALE_FACTOR)))
+        self.search_dungeon_combo = ttk.Combobox(search_row2, textvariable=self.search_dungeon_var, 
+                                                width=int(15*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.search_dungeon_combo.pack(side=tk.LEFT, padx=(0, int(8*SCALE_FACTOR)))
         
-        ttk.Label(search_row2, text="特殊掉落:").pack(side=tk.LEFT, padx=(0, 3))
-        self.search_item_combo = ttk.Combobox(search_row2, textvariable=self.search_item_var, width=15)
-        self.search_item_combo.pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(search_row2, text="特殊掉落:").pack(side=tk.LEFT, padx=(0, int(3*SCALE_FACTOR)))
+        self.search_item_combo = ttk.Combobox(search_row2, textvariable=self.search_item_var, 
+                                             width=int(15*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.search_item_combo.pack(side=tk.LEFT, padx=(0, int(8*SCALE_FACTOR)))
         
         search_row3 = ttk.Frame(parent)
-        search_row3.pack(fill=tk.X, pady=2)
-        ttk.Label(search_row3, text="开始时间:").pack(side=tk.LEFT, padx=(0, 3))
-        self.start_date_entry = ttk.Entry(search_row3, textvariable=self.start_date_var, width=12)
-        self.start_date_entry.pack(side=tk.LEFT, padx=(0, 5))
+        search_row3.pack(fill=tk.X, pady=int(2*SCALE_FACTOR))
+        ttk.Label(search_row3, text="开始时间:").pack(side=tk.LEFT, padx=(0, int(3*SCALE_FACTOR)))
+        self.start_date_entry = ttk.Entry(search_row3, textvariable=self.start_date_var, 
+                                         width=int(12*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.start_date_entry.pack(side=tk.LEFT, padx=(0, int(5*SCALE_FACTOR)))
         
-        ttk.Label(search_row3, text="结束时间:").pack(side=tk.LEFT, padx=(0, 3))
-        self.end_date_entry = ttk.Entry(search_row3, textvariable=self.end_date_var, width=12)
-        self.end_date_entry.pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Label(search_row3, text="结束时间:").pack(side=tk.LEFT, padx=(0, int(3*SCALE_FACTOR)))
+        self.end_date_entry = ttk.Entry(search_row3, textvariable=self.end_date_var, 
+                                       width=int(12*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.end_date_entry.pack(side=tk.LEFT, padx=(0, int(5*SCALE_FACTOR)))
         
-        ttk.Label(search_row3, text="团队类型:").pack(side=tk.LEFT, padx=(0, 3))
+        ttk.Label(search_row3, text="团队类型:").pack(side=tk.LEFT, padx=(0, int(3*SCALE_FACTOR)))
         self.search_team_type_combo = ttk.Combobox(search_row3, textvariable=self.search_team_type_var, 
-                                                  values=["", "十人本", "二十五人本"], width=10)
-        self.search_team_type_combo.pack(side=tk.LEFT, padx=(0, 5))
+                                                  values=["", "十人本", "二十五人本"], 
+                                                  width=int(10*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.search_team_type_combo.pack(side=tk.LEFT, padx=(0, int(5*SCALE_FACTOR)))
         
         search_row4 = ttk.Frame(parent)
-        search_row4.pack(fill=tk.X, pady=2)
+        search_row4.pack(fill=tk.X, pady=int(2*SCALE_FACTOR))
         
         left_btn_frame = ttk.Frame(search_row4)
         left_btn_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(left_btn_frame, text="查询", command=self.search_records, width=10
-        ).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(left_btn_frame, text="重置", command=self.reset_search, width=10
-        ).pack(side=tk.LEFT, padx=5)
+        ttk.Button(left_btn_frame, text="查询", command=self.search_records, width=int(10*SCALE_FACTOR)
+        ).pack(side=tk.LEFT, padx=(0, int(5*SCALE_FACTOR)))
+        ttk.Button(left_btn_frame, text="重置", command=self.reset_search, width=int(10*SCALE_FACTOR)
+        ).pack(side=tk.LEFT, padx=int(5*SCALE_FACTOR))
+        ttk.Button(left_btn_frame, text="修复数据库", command=self.repair_database, width=int(10*SCALE_FACTOR)
+        ).pack(side=tk.LEFT, padx=int(5*SCALE_FACTOR))
         
         right_btn_frame = ttk.Frame(search_row4)
         right_btn_frame.pack(side=tk.RIGHT, fill=tk.X, expand=True)
-        ttk.Button(right_btn_frame, text="导入数据", command=self.import_data, width=10
-        ).pack(side=tk.RIGHT, padx=(0, 5))
-        ttk.Button(right_btn_frame, text="导出数据", command=self.export_data, width=10
-        ).pack(side=tk.RIGHT, padx=(0, 5))
+        ttk.Button(right_btn_frame, text="导入数据", command=self.import_data, width=int(10*SCALE_FACTOR)
+        ).pack(side=tk.RIGHT, padx=(0, int(5*SCALE_FACTOR)))
+        ttk.Button(right_btn_frame, text="导出数据", command=self.export_data, width=int(10*SCALE_FACTOR)
+        ).pack(side=tk.RIGHT, padx=(0, int(5*SCALE_FACTOR)))
 
     def setup_tree_columns(self):
+        """设置树形视图列"""
         columns = [
-            ("row_num", "序号", 35),
-            ("dungeon", "副本名称", 100),
-            ("time", "时间", 100),
-            ("team_type", "团队类型", 70),
-            ("lie_down", "躺拍人数", 70),
-            ("total", "团队总工资", 100),
-            ("personal", "个人工资", 100),
-            ("black_owner", "黑本", 70),
-            ("worker", "打工仔", 70),
-            ("note", "备注", 100)
+            ("row_num", "序号", int(35*SCALE_FACTOR)),
+            ("dungeon", "副本名称", int(100*SCALE_FACTOR)),
+            ("time", "时间", int(100*SCALE_FACTOR)),
+            ("team_type", "团队类型", int(70*SCALE_FACTOR)),
+            ("lie_down", "躺拍人数", int(70*SCALE_FACTOR)),
+            ("total", "团队总工资", int(100*SCALE_FACTOR)),
+            ("personal", "个人工资", int(100*SCALE_FACTOR)),
+            ("black_owner", "黑本", int(70*SCALE_FACTOR)),
+            ("worker", "打工仔", int(70*SCALE_FACTOR)),
+            ("note", "备注", int(100*SCALE_FACTOR))
         ]
         
         for col_id, heading, width in columns:
@@ -610,32 +781,35 @@ class JX3DungeonTracker:
             self.record_tree.column(col_id, width=width, anchor=tk.CENTER, stretch=(col_id == "note"))
 
     def setup_tooltip(self):
+        """设置工具提示"""
         self.tooltip = tk.Toplevel(self.root)
         self.tooltip.withdraw()
         self.tooltip.overrideredirect(True)
         self.tooltip.configure(bg="#ffffe0", relief="solid", borderwidth=1)
         self.tooltip_label = tk.Label(self.tooltip, text="", justify=tk.LEFT, 
-                                     bg="#ffffe0", font=("PingFang SC", 9))
-        self.tooltip_label.pack(padx=5, pady=5)
+                                     bg="#ffffe0", font=("PingFang SC", int(9*SCALE_FACTOR)))
+        self.tooltip_label.pack(padx=int(5*SCALE_FACTOR), pady=int(5*SCALE_FACTOR))
         
         self.record_tree.bind("<Motion>", self.on_tree_motion)
         self.record_tree.bind("<Leave>", self.hide_tooltip)
 
     def setup_context_menu(self):
+        """设置上下文菜单"""
         self.context_menu = tk.Menu(self.root, tearoff=0)
         self.context_menu.add_command(label="删除记录", command=self.delete_selected_records)
         self.record_tree.bind("<Button-3>", self.show_record_context_menu)
 
     def create_stats_tab(self, parent):
+        """创建统计选项卡"""
         main_frame = ttk.Frame(parent)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=int(10*SCALE_FACTOR), pady=int(10*SCALE_FACTOR))
         
         if not MATPLOTLIB_AVAILABLE:
             self.show_matplotlib_error(main_frame)
             return
         
         left_frame = ttk.Frame(main_frame)
-        left_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        left_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, int(10*SCALE_FACTOR)))
         self.build_stats_cards(left_frame)
         
         right_frame = ttk.Frame(main_frame)
@@ -644,14 +818,16 @@ class JX3DungeonTracker:
         self.build_worker_stats(right_frame)
 
     def show_matplotlib_error(self, parent):
+        """显示matplotlib错误信息"""
         error_frame = ttk.Frame(parent)
-        error_frame.pack(fill=tk.BOTH, expand=True, pady=20)
+        error_frame.pack(fill=tk.BOTH, expand=True, pady=int(20*SCALE_FACTOR))
         ttk.Label(error_frame, 
                  text="需要安装matplotlib和numpy库才能显示统计图表\n请运行: pip install matplotlib numpy", 
-                 foreground="red", font=("PingFang SC", 10), anchor="center", justify="center"
+                 foreground="red", font=("PingFang SC", int(10*SCALE_FACTOR)), anchor="center", justify="center"
         ).pack(fill=tk.BOTH, expand=True)
 
     def build_stats_cards(self, parent):
+        """构建统计卡片"""
         self.total_records_var = tk.StringVar(value="0")
         self.team_total_gold_var = tk.StringVar(value="0")
         self.team_max_gold_var = tk.StringVar(value="0")
@@ -667,36 +843,45 @@ class JX3DungeonTracker:
         ]
         
         for title, var in cards:
-            card = ttk.LabelFrame(parent, text=title, padding=(10, 8))
-            card.pack(fill=tk.X, pady=5)
-            ttk.Label(card, textvariable=var, font=("PingFang SC", 14, "bold"), anchor="center"
+            card = ttk.LabelFrame(parent, text=title, padding=(int(10*SCALE_FACTOR), int(8*SCALE_FACTOR)))
+            card.pack(fill=tk.X, pady=int(5*SCALE_FACTOR))
+            ttk.Label(card, textvariable=var, font=("PingFang SC", int(14*SCALE_FACTOR), "bold"), anchor="center"
             ).pack(fill=tk.BOTH, expand=True)
 
     def build_chart_area(self, parent):
-        chart_frame = ttk.LabelFrame(parent, text="每周数据统计", padding=(8, 6))
+        """构建图表区域"""
+        chart_frame = ttk.LabelFrame(parent, text="每周数据统计", padding=(int(8*SCALE_FACTOR), int(6*SCALE_FACTOR)))
         chart_frame.pack(fill=tk.BOTH, expand=True)
         
         if MATPLOTLIB_AVAILABLE:
             plt.rcParams['font.family'] = 'sans-serif'
             plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'KaiTi', 'Arial Unicode MS']
             plt.rcParams['axes.unicode_minus'] = False
-            
-            self.fig, self.ax = plt.subplots(figsize=(6, 2.5), dpi=100)
+        
+            self.fig, self.ax = plt.subplots(figsize=(int(6*SCALE_FACTOR), int(2.5*SCALE_FACTOR)), dpi=100)
             self.fig.patch.set_facecolor('#f5f5f7')
             self.ax.set_facecolor('#f5f5f7')
-            
+        
+            # 设置图表标题和标签的字体大小
+            plt.rcParams['axes.titlesize'] = int(12*SCALE_FACTOR)
+            plt.rcParams['axes.labelsize'] = int(10*SCALE_FACTOR)
+            plt.rcParams['xtick.labelsize'] = int(8*SCALE_FACTOR)
+            plt.rcParams['ytick.labelsize'] = int(8*SCALE_FACTOR)
+            plt.rcParams['legend.fontsize'] = int(10*SCALE_FACTOR)
+        
             self.canvas = FigureCanvasTkAgg(self.fig, master=chart_frame)
             self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
     def build_worker_stats(self, parent):
-        worker_frame = ttk.LabelFrame(parent, text="打工仔统计", padding=(8, 6))
-        worker_frame.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        """构建打工仔统计"""
+        worker_frame = ttk.LabelFrame(parent, text="打工仔统计", padding=(int(8*SCALE_FACTOR), int(6*SCALE_FACTOR)))
+        worker_frame.pack(fill=tk.BOTH, expand=True, pady=(int(8*SCALE_FACTOR), 0))
         
         tree_frame = ttk.Frame(worker_frame)
         tree_frame.pack(fill=tk.BOTH, expand=True)
         
         self.worker_stats_tree = ttk.Treeview(tree_frame, columns=("worker", "count", "total_personal", "avg_personal"), 
-                                            show="headings", height=5)
+                                            show="headings", height=int(5*SCALE_FACTOR))
         
         vsb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.worker_stats_tree.yview)
         hsb = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=self.worker_stats_tree.xview)
@@ -710,10 +895,10 @@ class JX3DungeonTracker:
         tree_frame.rowconfigure(0, weight=1)
         
         columns = [
-            ("worker", "打工仔", 100),
-            ("count", "参与次数", 70),
-            ("total_personal", "总工资", 100),
-            ("avg_personal", "平均工资", 100)
+            ("worker", "打工仔", int(100*SCALE_FACTOR)),
+            ("count", "参与次数", int(70*SCALE_FACTOR)),
+            ("total_personal", "总工资", int(100*SCALE_FACTOR)),
+            ("avg_personal", "平均工资", int(100*SCALE_FACTOR))
         ]
         
         for col_id, heading, width in columns:
@@ -723,23 +908,25 @@ class JX3DungeonTracker:
         self.setup_column_resizing(self.worker_stats_tree)
 
     def create_preset_tab(self, parent):
+        """创建预设选项卡"""
         pane = ttk.PanedWindow(parent, orient=tk.VERTICAL)
         pane.pack(fill=tk.BOTH, expand=True)
         
-        list_frame = ttk.LabelFrame(pane, text="副本列表", padding=8)
+        list_frame = ttk.LabelFrame(pane, text="副本列表", padding=int(8*SCALE_FACTOR))
         self.build_dungeon_list(list_frame)
         
-        form_frame = ttk.LabelFrame(pane, text="副本详情", padding=8)
+        form_frame = ttk.LabelFrame(pane, text="副本详情", padding=int(8*SCALE_FACTOR))
         self.build_dungeon_form(form_frame)
         
         pane.add(list_frame, weight=2)
         pane.add(form_frame, weight=1)
 
     def build_dungeon_list(self, parent):
+        """构建副本列表"""
         tree_frame = ttk.Frame(parent)
-        tree_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        tree_frame.pack(fill=tk.BOTH, expand=True, pady=(0, int(8*SCALE_FACTOR)))
         
-        self.dungeon_tree = ttk.Treeview(tree_frame, columns=("name", "drops"), show="headings", height=19)
+        self.dungeon_tree = ttk.Treeview(tree_frame, columns=("name", "drops"), show="headings", height=int(22*SCALE_FACTOR))
         
         vsb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.dungeon_tree.yview)
         hsb = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=self.dungeon_tree.xview)
@@ -753,8 +940,8 @@ class JX3DungeonTracker:
         tree_frame.rowconfigure(0, weight=1)
         
         columns = [
-            ("name", "副本名称", 120),
-            ("drops", "特殊掉落", 150)
+            ("name", "副本名称", int(120*SCALE_FACTOR)),
+            ("drops", "特殊掉落", int(150*SCALE_FACTOR))
         ]
 
         for col_id, heading, width in columns:
@@ -773,55 +960,61 @@ class JX3DungeonTracker:
         ]
         
         for text, command in buttons:
-            ttk.Button(btn_frame, text=text, command=command, width=10
-            ).pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
+            ttk.Button(btn_frame, text=text, command=command, width=int(10*SCALE_FACTOR)
+            ).pack(side=tk.LEFT, padx=int(2*SCALE_FACTOR), fill=tk.X, expand=True)
 
     def build_dungeon_form(self, parent):
+        """构建副本表单"""
         parent.grid_columnconfigure(1, weight=1)
         
         name_row = ttk.Frame(parent)
-        name_row.grid(row=0, column=0, columnspan=3, sticky="ew", pady=5)
+        name_row.grid(row=0, column=0, columnspan=3, sticky="ew", pady=int(5*SCALE_FACTOR))
         name_row.columnconfigure(1, weight=1)
         
-        ttk.Label(name_row, text="副本名称:").grid(row=0, column=0, padx=4, sticky=tk.W)
-        self.preset_name_entry = ttk.Entry(name_row, textvariable=self.preset_name_var, width=15)
-        self.preset_name_entry.grid(row=0, column=1, padx=4, sticky=tk.W)
+        ttk.Label(name_row, text="副本名称:").grid(row=0, column=0, padx=int(4*SCALE_FACTOR), sticky=tk.W)
+        self.preset_name_entry = ttk.Entry(name_row, textvariable=self.preset_name_var, 
+                                          width=int(15*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.preset_name_entry.grid(row=0, column=1, padx=int(4*SCALE_FACTOR), sticky=tk.W)
         
         btn_frame = ttk.Frame(name_row)
-        btn_frame.grid(row=0, column=2, padx=4, sticky=tk.E)
+        btn_frame.grid(row=0, column=2, padx=int(4*SCALE_FACTOR), sticky=tk.E)
         
-        ttk.Button(btn_frame, text="保存", width=8, command=self.save_dungeon
-        ).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="清空", width=8, command=self.clear_preset_form
-        ).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="保存", width=int(8*SCALE_FACTOR), command=self.save_dungeon
+        ).pack(side=tk.LEFT, padx=int(2*SCALE_FACTOR))
+        ttk.Button(btn_frame, text="清空", width=int(8*SCALE_FACTOR), command=self.clear_preset_form
+        ).pack(side=tk.LEFT, padx=int(2*SCALE_FACTOR))
         
-        ttk.Label(parent, text="特殊掉落:").grid(row=1, column=0, padx=4, pady=5, sticky=tk.W)
-        self.preset_drops_entry = ttk.Entry(parent, textvariable=self.preset_drops_var, width=180)
-        self.preset_drops_entry.grid(row=1, column=1, padx=4, pady=5, sticky=tk.W, columnspan=2)
+        ttk.Label(parent, text="特殊掉落:").grid(row=1, column=0, padx=int(4*SCALE_FACTOR), pady=int(5*SCALE_FACTOR), sticky=tk.W)
+        self.preset_drops_entry = ttk.Entry(parent, textvariable=self.preset_drops_var, 
+                                           width=int(180*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.preset_drops_entry.grid(row=1, column=1, padx=int(4*SCALE_FACTOR), pady=int(5*SCALE_FACTOR), sticky=tk.W, columnspan=2)
         
-        batch_frame = ttk.LabelFrame(parent, text="批量添加特殊掉落", padding=6)
-        batch_frame.grid(row=2, column=0, columnspan=3, padx=4, pady=5, sticky=tk.W+tk.E)
+        batch_frame = ttk.LabelFrame(parent, text="批量添加特殊掉落", padding=int(6*SCALE_FACTOR))
+        batch_frame.grid(row=2, column=0, columnspan=3, padx=int(4*SCALE_FACTOR), pady=int(5*SCALE_FACTOR), sticky=tk.W+tk.E)
         batch_frame.columnconfigure(0, weight=1)
         
-        ttk.Label(batch_frame, text="输入多个物品，用逗号或方括号分隔:").pack(side=tk.TOP, anchor=tk.W, pady=(0, 4))
+        ttk.Label(batch_frame, text="输入多个物品，用逗号或方括号分隔:").pack(side=tk.TOP, anchor=tk.W, pady=(0, int(4*SCALE_FACTOR)))
         
         input_frame = ttk.Frame(batch_frame)
-        input_frame.pack(fill=tk.X, pady=2)
+        input_frame.pack(fill=tk.X, pady=int(2*SCALE_FACTOR))
         
         self.batch_items_var = tk.StringVar()
-        batch_entry = ttk.Entry(input_frame, textvariable=self.batch_items_var)
-        batch_entry.pack(side=tk.LEFT, padx=(0, 8), fill=tk.X, expand=True)
+        batch_entry = ttk.Entry(input_frame, textvariable=self.batch_items_var, font=("PingFang SC", int(10*SCALE_FACTOR)))
+        batch_entry.pack(side=tk.LEFT, padx=(0, int(8*SCALE_FACTOR)), fill=tk.X, expand=True)
         
-        ttk.Button(input_frame, text="添加", command=self.batch_add_items, width=8
+        ttk.Button(input_frame, text="添加", command=self.batch_add_items, width=int(8*SCALE_FACTOR)
         ).pack(side=tk.LEFT)
 
     def setup_events(self):
+        """设置事件绑定"""
+        # 绑定变量变化事件
         self.trash_gold_var.trace_add("write", self.update_total_gold)
         self.iron_gold_var.trace_add("write", self.update_total_gold)
         self.other_gold_var.trace_add("write", self.update_total_gold)
         self.special_total_var.trace_add("write", self.update_total_gold)
         self.total_gold_var.trace_add("write", self.validate_difference)
         
+        # 设置数字输入验证
         reg = self.root.register(self.validate_numeric_input)
         vcmd = (reg, '%P')
         for entry in [self.trash_gold_entry, self.iron_gold_entry, self.other_gold_entry, 
@@ -829,27 +1022,127 @@ class JX3DungeonTracker:
                      self.personal_gold_entry]:
             entry.config(validate="key", validatecommand=vcmd)
         
+        # 绑定组合框事件
         self.dungeon_combo.bind("<<ComboboxSelected>>", self.on_dungeon_select)
         self.search_dungeon_combo.bind("<<ComboboxSelected>>", self.on_search_dungeon_select)
         
+        # 绑定记录树点击事件
+        self.record_tree.bind('<ButtonRelease-1>', self.on_record_click)
+        
+        # 延迟加载列宽和时间更新
         self.root.after(300, self.load_column_widths)
         self.root.after(1000, self.update_time)
 
+    def auto_resize_column(self, tree, column_id):
+        """自动调整列宽"""
+        font = tkFont.Font(family="PingFang SC", size=int(10*SCALE_FACTOR))
+        heading_text = tree.heading(column_id)["text"]
+        max_width = font.measure(heading_text) + int(20*SCALE_FACTOR)
+        
+        for item in tree.get_children():
+            cell_value = tree.set(item, column_id)
+            if cell_value:
+                cell_width = font.measure(cell_value) + int(20*SCALE_FACTOR)
+                if cell_width > max_width:
+                    max_width = cell_width
+        
+        tree.column(column_id, width=max_width)
+
+    def setup_column_resizing(self, tree):
+        """设置列调整"""
+        columns = tree["columns"]
+        for col in columns:
+            tree.heading(col, command=lambda c=col: self.auto_resize_column(tree, c))
+
+    def on_record_click(self, event):
+        """处理记录树点击事件"""
+        item = self.record_tree.identify('item', event.x, event.y)
+        if not item:
+            return
+            
+        selected = self.record_tree.selection()
+        if len(selected) == 1 and item in selected:
+            self.fill_form_from_record(item)
+
+    def fill_form_from_record(self, item):
+        """从记录填充表单"""
+        values = self.record_tree.item(item, 'values')
+        if not values:
+            return
+            
+        dungeon_name = values[1]
+        time_str = values[2]
+        
+        # 查询数据库获取完整记录
+        record = self.db.execute_query('''
+            SELECT r.id, d.name, r.trash_gold, r.iron_gold, r.other_gold, r.special_auctions, 
+                   r.total_gold, r.black_owner, r.worker, r.time, r.team_type, r.lie_down_count, 
+                   r.fine_gold, r.subsidy_gold, r.personal_gold, r.note
+            FROM records r
+            JOIN dungeons d ON r.dungeon_id = d.id
+            WHERE d.name = ? AND r.time LIKE ?
+        ''', (dungeon_name, f"{time_str}%"))
+        
+        if not record:
+            return
+            
+        r = record[0]
+        self.dungeon_var.set(r[1])
+        self.trash_gold_var.set(str(r[2]) if r[2] != 0 else "")
+        self.iron_gold_var.set(str(r[3]) if r[3] != 0 else "")
+        self.other_gold_var.set(str(r[4]) if r[4] != 0 else "")
+        self.total_gold_var.set(str(r[6]))
+        self.black_owner_var.set(r[7] or "")
+        self.worker_var.set(r[8] or "")
+        self.team_type_var.set(r[10])
+        self.lie_down_var.set(str(r[11]) if r[11] != 0 else "")
+        self.fine_gold_var.set(str(r[12]) if r[12] != 0 else "")
+        self.subsidy_gold_var.set(str(r[13]) if r[13] != 0 else "")
+        self.personal_gold_var.set(str(r[14]))
+        self.note_var.set(r[15] or "")
+        
+        # 填充特殊掉落
+        self.special_tree.clear()
+        special_auctions = json.loads(r[5]) if r[5] else []
+        for item_data in special_auctions:
+            self.special_tree.add_item(item_data['item'], item_data['price'])
+        self.special_total_var.set(str(self.special_tree.calculate_total()))
+        
+        # 更新按钮状态
+        self.add_btn.configure(state=tk.NORMAL)
+        self.edit_btn.configure(state=tk.NORMAL)
+        self.update_btn.configure(state=tk.DISABLED)
+        
+        # 清除当前编辑ID
+        if hasattr(self, 'current_edit_id'):
+            del self.current_edit_id
+
     def load_data(self):
+        """加载数据"""
         self.load_dungeon_options()
+        
+        # 检查数据库完整性
+        self.check_database_integrity()
+        
         self.load_dungeon_records()
         self.load_dungeon_presets()
         self.update_stats()
         self.load_black_owner_options()
         self.clear_new_record_highlights()
+        
+        print(f"数据加载完成 - 记录树中的项目数量: {len(self.record_tree.get_children())}")
 
     def load_dungeon_options(self):
-        dungeons = [row[0] for row in self.db.execute_query("SELECT name FROM dungeons")]
-        self.dungeon_combo['values'] = dungeons
-        self.search_dungeon_combo['values'] = dungeons
+        """加载副本选项"""
+        if self.cached_dungeons is None:
+            self.cached_dungeons = [row[0] for row in self.db.execute_query("SELECT name FROM dungeons")]
+        
+        self.dungeon_combo['values'] = self.cached_dungeons
+        self.search_dungeon_combo['values'] = self.cached_dungeons
         self.search_item_combo['values'] = self.get_all_special_items()
 
     def get_all_special_items(self):
+        """获取所有特殊物品"""
         items = set()
         for row in self.db.execute_query("SELECT special_drops FROM dungeons"):
             if row[0]:
@@ -858,19 +1151,29 @@ class JX3DungeonTracker:
         return list(items)
 
     def load_dungeon_records(self):
-        self.record_tree.delete(*self.record_tree.get_children())
+        """加载副本记录"""
+        # 清除现有记录
+        for item in self.record_tree.get_children():
+            self.record_tree.delete(item)
+        
+        # 使用LEFT JOIN确保即使dungeon_id无效也能显示记录
         records = self.db.execute_query('''
-            SELECT r.id, d.name, strftime('%Y-%m-%d %H:%M', r.time), 
+            SELECT r.id, 
+                   COALESCE(d.name, '未知副本') as dungeon_name, 
+                   strftime('%Y-%m-%d %H:%M', r.time), 
                    r.team_type, r.lie_down_count, r.total_gold, 
                    r.personal_gold, r.black_owner, r.worker, r.note, r.is_new
             FROM records r
-            JOIN dungeons d ON r.dungeon_id = d.id
+            LEFT JOIN dungeons d ON r.dungeon_id = d.id
             ORDER BY r.time DESC
         ''')
+        
+        print(f"从数据库查询到的记录数量: {len(records)}")
         
         total_records = len(records)
         row_num = total_records
         
+        # 插入记录到树形视图
         for row in records:
             note = row[9] or ""
             if len(note) > 15:
@@ -881,20 +1184,30 @@ class JX3DungeonTracker:
                 tags = ("new_record",)
                 self.new_record_ids.add(row[0])
             
-            self.record_tree.insert("", "end", values=(row_num, row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], note), tags=tags)
+            self.record_tree.insert("", "end", values=(
+                row_num, row[1], row[2], row[3], row[4], 
+                f"{row[5]:,}", f"{row[6]:,}", row[7], row[8], note
+            ), tags=tags)
             row_num -= 1
+        
+        # 刷新UI
+        self.record_tree.update_idletasks()
+        print(f"记录树已刷新，包含 {len(self.record_tree.get_children())} 条记录")
 
     def clear_new_record_highlights(self):
+        """清除新记录高亮"""
         self.db.execute_update("UPDATE records SET is_new = 0 WHERE is_new = 1")
         for item in self.record_tree.get_children():
             self.record_tree.item(item, tags=())
 
     def load_dungeon_presets(self):
+        """加载副本预设"""
         self.dungeon_tree.delete(*self.dungeon_tree.get_children())
         for row in self.db.execute_query("SELECT name, special_drops FROM dungeons"):
             self.dungeon_tree.insert("", "end", values=(row[0], row[1]))
 
     def load_column_widths(self):
+        """加载列宽设置"""
         trees = [
             (self.record_tree, "record_tree"),
             (self.worker_stats_tree, "worker_stats_tree"),
@@ -913,6 +1226,7 @@ class JX3DungeonTracker:
                     pass
 
     def save_column_widths(self):
+        """保存列宽设置"""
         trees = [
             (self.record_tree, "record_tree"),
             (self.worker_stats_tree, "worker_stats_tree"),
@@ -928,9 +1242,11 @@ class JX3DungeonTracker:
                 ''', (tree_name, json.dumps(widths)))
 
     def validate_numeric_input(self, new_value):
+        """验证数字输入"""
         return new_value == "" or new_value.isdigit()
 
     def on_dungeon_select(self, event):
+        """处理副本选择事件"""
         selected = self.dungeon_var.get()
         if not selected:
             return
@@ -942,6 +1258,7 @@ class JX3DungeonTracker:
             self.special_item_combo['values'] = []
 
     def on_search_dungeon_select(self, event=None):
+        """处理搜索副本选择事件"""
         selected = self.search_dungeon_var.get()
         if selected:
             result = self.db.execute_query("SELECT special_drops FROM dungeons WHERE name=?", (selected,))
@@ -954,10 +1271,12 @@ class JX3DungeonTracker:
             self.search_item_combo['values'] = self.get_all_special_items()
 
     def update_time(self):
+        """更新时间显示"""
         self.time_var.set(get_current_time())
         self.root.after(1000, self.update_time)
 
     def add_special_item(self):
+        """添加特殊物品"""
         item = self.special_item_var.get().strip()
         price = self.special_price_var.get().strip()
         
@@ -975,6 +1294,7 @@ class JX3DungeonTracker:
         self.special_total_var.set(str(self.special_tree.calculate_total()))
 
     def update_total_gold(self, *args):
+        """更新总金额"""
         trash = self.trash_gold_var.get()
         iron = self.iron_gold_var.get()
         other = self.other_gold_var.get()
@@ -983,6 +1303,7 @@ class JX3DungeonTracker:
         self.total_gold_var.set(str(total))
 
     def validate_difference(self, *args):
+        """验证差额"""
         trash = self.trash_gold_var.get()
         iron = self.iron_gold_var.get()
         other = self.other_gold_var.get()
@@ -993,12 +1314,40 @@ class JX3DungeonTracker:
         self.difference_var.set(f"差额: {difference}")
         self.difference_label.configure(foreground="green" if difference == 0 else "red")
 
+    def validate_and_save(self):
+        """验证并保存数据"""
+        if not self.dungeon_var.get():
+            messagebox.showwarning("提示", "请选择副本")
+            return False
+            
+        if not self.total_gold_var.get().isdigit() or int(self.total_gold_var.get()) <= 0:
+            messagebox.showwarning("提示", "请输入有效的团队总工资")
+            return False
+            
+        # 验证差额
+        trash = self.trash_gold_var.get()
+        iron = self.iron_gold_var.get()
+        other = self.other_gold_var.get()
+        special = self.special_total_var.get()
+        total = self.total_gold_var.get()
+        
+        difference = GoldCalculator.calculate_difference(total, trash, iron, other, special)
+        if difference != 0:
+            if not messagebox.askyesno("确认", f"工资计算存在差额: {difference}，是否继续保存？"):
+                return False
+        
+        # 保存数据
+        self.add_record()
+        return True
+
     def add_record(self):
+        """添加记录"""
         dungeon = self.dungeon_var.get()
         if not dungeon:
             messagebox.showwarning("提示", "请选择副本")
             return
             
+        # 获取副本ID
         result = self.db.execute_query("SELECT id FROM dungeons WHERE name=?", (dungeon,))
         if not result:
             messagebox.showerror("错误", f"找不到副本 '{dungeon}'")
@@ -1006,41 +1355,55 @@ class JX3DungeonTracker:
             
         dungeon_id = result[0][0]
         special_auctions = self.special_tree.get_items()
+        
+        # 计算个人工资
         personal_gold = GoldCalculator.safe_int(self.personal_gold_var.get())
         
+        # 获取当前时间
         current_time = get_current_time()
         
-        self.db.execute_update('''
-            INSERT INTO records (
-                dungeon_id, trash_gold, iron_gold, other_gold, special_auctions, 
-                total_gold, black_owner, worker, time, team_type, lie_down_count, 
-                fine_gold, subsidy_gold, personal_gold, note, is_new
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-        ''', (
-            dungeon_id,
-            GoldCalculator.safe_int(self.trash_gold_var.get()),
-            GoldCalculator.safe_int(self.iron_gold_var.get()),
-            GoldCalculator.safe_int(self.other_gold_var.get()),
-            json.dumps(special_auctions, ensure_ascii=False),
-            GoldCalculator.safe_int(self.total_gold_var.get()),
-            self.black_owner_var.get() or None,
-            self.worker_var.get() or None,
-            current_time,
-            self.team_type_var.get(),
-            GoldCalculator.safe_int(self.lie_down_var.get()),
-            GoldCalculator.safe_int(self.fine_gold_var.get()),
-            GoldCalculator.safe_int(self.subsidy_gold_var.get()),
-            personal_gold,
-            self.note_var.get() or ""
-        ))
-        
-        self.load_dungeon_records()
-        self.update_stats()
-        self.load_black_owner_options()
-        messagebox.showinfo("成功", "记录已添加")
-        self.clear_form()
+        # 构建SQL插入语句
+        try:
+            self.db.execute_update('''
+                INSERT INTO records (
+                    dungeon_id, trash_gold, iron_gold, other_gold, special_auctions, 
+                    total_gold, black_owner, worker, time, team_type, lie_down_count, 
+                    fine_gold, subsidy_gold, personal_gold, note, is_new
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            ''', (
+                dungeon_id,
+                GoldCalculator.safe_int(self.trash_gold_var.get()),
+                GoldCalculator.safe_int(self.iron_gold_var.get()),
+                GoldCalculator.safe_int(self.other_gold_var.get()),
+                json.dumps(special_auctions, ensure_ascii=False),
+                GoldCalculator.safe_int(self.total_gold_var.get()),
+                self.black_owner_var.get() or None,
+                self.worker_var.get() or None,
+                current_time,
+                self.team_type_var.get(),
+                GoldCalculator.safe_int(self.lie_down_var.get()),
+                GoldCalculator.safe_int(self.fine_gold_var.get()),
+                GoldCalculator.safe_int(self.subsidy_gold_var.get()),
+                personal_gold,
+                self.note_var.get() or ""
+            ))
+            
+            print("记录已成功添加到数据库")
+            
+            # 刷新数据
+            self.load_dungeon_records()
+            self.update_stats()
+            self.load_black_owner_options()
+            
+            messagebox.showinfo("成功", "记录已添加")
+            self.clear_form()
+            
+        except Exception as e:
+            messagebox.showerror("错误", f"保存记录时出错: {str(e)}")
+            print(f"保存记录错误: {e}")
 
     def edit_record(self):
+        """编辑记录"""
         selected = self.record_tree.selection()
         if not selected:
             messagebox.showwarning("提示", "请选择一条记录")
@@ -1090,6 +1453,7 @@ class JX3DungeonTracker:
         self.update_btn.configure(state=tk.NORMAL)
 
     def update_record(self):
+        """更新记录"""
         if not hasattr(self, 'current_edit_id'):
             return
             
@@ -1138,6 +1502,7 @@ class JX3DungeonTracker:
         self.clear_form()
 
     def clear_form(self):
+        """清空表单"""
         self.dungeon_var.set("")
         self.trash_gold_var.set("")
         self.iron_gold_var.set("")
@@ -1163,6 +1528,7 @@ class JX3DungeonTracker:
             del self.current_edit_id
 
     def search_records(self):
+        """搜索记录"""
         self.record_tree.delete(*self.record_tree.get_children())
         conditions, params = [], []
         
@@ -1222,6 +1588,7 @@ class JX3DungeonTracker:
             row_num -= 1
 
     def validate_date(self, date_str):
+        """验证日期格式"""
         if not date_str:
             return True
         try:
@@ -1231,6 +1598,7 @@ class JX3DungeonTracker:
             return False
 
     def reset_search(self):
+        """重置搜索"""
         self.search_dungeon_var.set("")
         self.search_item_var.set("")
         self.search_owner_var.set("")
@@ -1242,13 +1610,17 @@ class JX3DungeonTracker:
         self.load_dungeon_records()
 
     def show_record_context_menu(self, event):
+        """显示记录上下文菜单"""
         row_id = self.record_tree.identify_row(event.y)
         if not row_id:
             return
-        self.record_tree.selection_set(row_id)
+        # 如果右键点击的项目不在当前选择中，则清除选择并选择该项目
+        if row_id not in self.record_tree.selection():
+            self.record_tree.selection_set(row_id)
         self.context_menu.post(event.x_root, event.y_root)
 
     def delete_selected_records(self):
+        """删除选中记录"""
         selected = self.record_tree.selection()
         if not selected:
             messagebox.showwarning("提示", "请选择要删除的记录")
@@ -1278,6 +1650,7 @@ class JX3DungeonTracker:
         messagebox.showinfo("成功", "记录已删除")
 
     def on_tree_motion(self, event):
+        """处理树形视图鼠标移动事件"""
         self.tooltip.withdraw()
         row_id = self.record_tree.identify_row(event.y)
         col_id = self.record_tree.identify_column(event.x)
@@ -1331,27 +1704,30 @@ class JX3DungeonTracker:
                 self.show_tooltip(event, f"罚款金额: {fine}\n补贴金额: {subsidy}")
 
     def show_tooltip(self, event, text):
+        """显示工具提示"""
         self.tooltip_label.config(text=text)
         self.tooltip.update_idletasks()
         
-        x = event.x_root + 15
-        y = event.y_root + 15
+        x = event.x_root + int(15*SCALE_FACTOR)
+        y = event.y_root + int(15*SCALE_FACTOR)
         
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
         
         if x + self.tooltip.winfo_width() > screen_width:
-            x = event.x_root - self.tooltip.winfo_width() - 5
+            x = event.x_root - self.tooltip.winfo_width() - int(5*SCALE_FACTOR)
         if y + self.tooltip.winfo_height() > screen_height:
-            y = event.y_root - self.tooltip.winfo_height() - 5
+            y = event.y_root - self.tooltip.winfo_height() - int(5*SCALE_FACTOR)
             
         self.tooltip.geometry(f"+{x}+{y}")
         self.tooltip.deiconify()
 
     def hide_tooltip(self, event=None):
+        """隐藏工具提示"""
         self.tooltip.withdraw()
 
     def update_stats(self):
+        """更新统计信息"""
         total_records = self.db.execute_query("SELECT COUNT(*) FROM records")[0][0] or 0
         self.total_records_var.set(str(total_records))
         
@@ -1369,8 +1745,11 @@ class JX3DungeonTracker:
         
         self.update_worker_stats()
         self.update_chart()
+        
+        print(f"统计信息已更新 - 总记录数: {total_records}")
 
     def update_worker_stats(self):
+        """更新打工仔统计"""
         self.worker_stats_tree.delete(*self.worker_stats_tree.get_children())
         workers = self.db.execute_query('''
             SELECT worker, COUNT(*), SUM(personal_gold), AVG(personal_gold)
@@ -1390,6 +1769,7 @@ class JX3DungeonTracker:
             ))
 
     def update_chart(self):
+        """更新图表"""
         if not MATPLOTLIB_AVAILABLE:
             return
             
@@ -1408,7 +1788,7 @@ class JX3DungeonTracker:
         ''', (start_date.strftime("%Y-%m-%d"),))
         
         if not results:
-            self.ax.text(0.5, 0.5, "暂无数据", ha='center', va='center', fontsize=10)
+            self.ax.text(0.5, 0.5, "暂无数据", ha='center', va='center', fontsize=int(10*SCALE_FACTOR))
             self.canvas.draw()
             return
             
@@ -1422,21 +1802,23 @@ class JX3DungeonTracker:
         
         self.ax.plot(weeks, team_gold, 'o-', label='团队总工资')
         self.ax.plot(weeks, personal_gold, 's-', label='个人总工资')
-        self.ax.set_title('每周工资统计', fontsize=12)
-        self.ax.set_xlabel('日期', fontsize=10)
-        self.ax.set_ylabel('金额', fontsize=10)
-        self.ax.legend(fontsize=10)
+        self.ax.set_title('每周工资统计', fontsize=int(12*SCALE_FACTOR))
+        self.ax.set_xlabel('日期', fontsize=int(10*SCALE_FACTOR))
+        self.ax.set_ylabel('金额', fontsize=int(10*SCALE_FACTOR))
+        self.ax.legend(fontsize=int(10*SCALE_FACTOR))
         self.ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
-        self.ax.xaxis.set_major_locator(mdates.WeekdayLocator())
+        self.ax.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=mdates.MO))
         self.fig.autofmt_xdate()
         self.ax.grid(True, linestyle='--', alpha=0.7)
         self.canvas.draw()
 
     def add_dungeon(self):
+        """添加副本"""
         self.clear_preset_form()
         self.preset_name_entry.focus()
 
     def edit_dungeon(self):
+        """编辑副本"""
         selected = self.dungeon_tree.selection()
         if not selected:
             messagebox.showwarning("提示", "请选择一个副本")
@@ -1447,6 +1829,7 @@ class JX3DungeonTracker:
         self.preset_drops_var.set(values[1])
 
     def delete_dungeon(self):
+        """删除副本"""
         selected = self.dungeon_tree.selection()
         if not selected:
             messagebox.showwarning("提示", "请选择一个副本")
@@ -1472,6 +1855,7 @@ class JX3DungeonTracker:
             self.load_dungeon_options()
 
     def batch_add_items(self):
+        """批量添加物品"""
         items_str = self.batch_items_var.get()
         if not items_str:
             return
@@ -1498,6 +1882,7 @@ class JX3DungeonTracker:
         self.batch_items_var.set("")
 
     def save_dungeon(self):
+        """保存副本"""
         name = self.preset_name_var.get().strip()
         drops = self.preset_drops_var.get().strip()
         
@@ -1518,11 +1903,13 @@ class JX3DungeonTracker:
         messagebox.showinfo("成功", "副本预设已保存")
 
     def clear_preset_form(self):
+        """清空预设表单"""
         self.preset_name_var.set("")
         self.preset_drops_var.set("")
         self.batch_items_var.set("")
 
     def import_data(self):
+        """导入数据"""
         file_path = filedialog.askopenfilename(title="选择数据文件", filetypes=[("JSON文件", "*.json")])
         if not file_path:
             return
@@ -1604,6 +1991,7 @@ class JX3DungeonTracker:
             messagebox.showerror("错误", f"导入数据失败: {str(e)}")
 
     def export_data(self):
+        """导出数据"""
         file_path = filedialog.asksaveasfilename(
             title="保存数据文件", filetypes=[("JSON文件", "*.json")], defaultextension=".json")
         if not file_path:
@@ -1638,18 +2026,72 @@ class JX3DungeonTracker:
             messagebox.showerror("错误", f"导出数据失败: {str(e)}")
 
     def load_black_owner_options(self):
-        owners = [row[0] for row in self.db.execute_query("SELECT DISTINCT black_owner FROM records WHERE black_owner IS NOT NULL AND black_owner != ''")]
-        workers = [row[0] for row in self.db.execute_query("SELECT DISTINCT worker FROM records WHERE worker IS NOT NULL AND worker != ''")]
+        """加载黑本和打工仔选项"""
+        if self.cached_owners is None:
+            self.cached_owners = [row[0] for row in self.db.execute_query("SELECT DISTINCT black_owner FROM records WHERE black_owner IS NOT NULL AND black_owner != ''")]
         
-        self.black_owner_combo['values'] = owners
-        self.search_owner_combo['values'] = owners
+        if self.cached_workers is None:
+            self.cached_workers = [row[0] for row in self.db.execute_query("SELECT DISTINCT worker FROM records WHERE worker IS NOT NULL AND worker != ''")]
+        
+        self.black_owner_combo['values'] = self.cached_owners
+        self.search_owner_combo['values'] = self.cached_owners
          
-        self.worker_combo['values'] = workers
-        self.search_worker_combo['values'] = workers
+        self.worker_combo['values'] = self.cached_workers
+        self.search_worker_combo['values'] = self.cached_workers
+
+    def check_database_integrity(self):
+        """检查数据库完整性"""
+        orphaned_records = self.db.execute_query('''
+            SELECT r.id, r.dungeon_id 
+            FROM records r 
+            WHERE r.dungeon_id NOT IN (SELECT id FROM dungeons) AND r.dungeon_id IS NOT NULL
+        ''')
+        
+        if orphaned_records:
+            print(f"找到 {len(orphaned_records)} 条无效的dungeon_id记录")
+            
+            valid_dungeon = self.db.execute_query("SELECT id FROM dungeons LIMIT 1")
+            if valid_dungeon:
+                valid_dungeon_id = valid_dungeon[0][0]
+                print(f"使用有效的dungeon_id进行修复: {valid_dungeon_id}")
+                
+                for record in orphaned_records:
+                    record_id, old_dungeon_id = record
+                    self.db.execute_update(
+                        "UPDATE records SET dungeon_id = ? WHERE id = ?",
+                        (valid_dungeon_id, record_id)
+                    )
+                    print(f"修复记录 {record_id}: dungeon_id {old_dungeon_id} -> {valid_dungeon_id}")
+                
+                print("数据库自动修复完成")
+        
+        return orphaned_records
+
+    def repair_database(self):
+        """修复数据库"""
+        orphaned_records = self.check_database_integrity()
+        if orphaned_records:
+            messagebox.showinfo("数据库修复", f"已修复 {len(orphaned_records)} 条无效记录")
+            self.load_dungeon_records()
+        else:
+            messagebox.showinfo("数据库修复", "没有发现需要修复的记录")
 
     def on_close(self):
+        """处理关闭事件"""
         self.clear_new_record_highlights()
         self.save_column_widths()
+        
+        # 保存窗口状态
+        width = self.root.winfo_width()
+        height = self.root.winfo_height()
+        x = self.root.winfo_x()
+        y = self.root.winfo_y()
+        maximized = 1 if self.root.state() == 'zoomed' else 0
+        
+        self.db.execute_update("DELETE FROM window_state")
+        self.db.execute_update("INSERT INTO window_state (width, height, maximized, x, y) VALUES (?, ?, ?, ?, ?)", 
+                              (width, height, maximized, x, y))
+        
         self.db.close()
         self.root.destroy()
 
