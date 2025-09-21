@@ -260,6 +260,30 @@ class SpecialItemsTree:
         
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(0, weight=1)
+        
+        # 添加上下文菜单
+        self.setup_context_menu()
+
+    def setup_context_menu(self):
+        """设置上下文菜单"""
+        self.context_menu = tk.Menu(self.tree, tearoff=0)
+        self.context_menu.add_command(label="删除选中项", command=self.delete_selected_items)
+        
+        # 绑定右键事件
+        self.tree.bind("<Button-3>", self.show_context_menu)
+
+    def show_context_menu(self, event):
+        """显示上下文菜单"""
+        item = self.tree.identify_row(event.y)
+        if item:
+            self.tree.selection_set(item)
+            self.context_menu.post(event.x_root, event.y_root)
+
+    def delete_selected_items(self):
+        """删除选中的物品"""
+        selected_items = self.tree.selection()
+        for item in selected_items:
+            self.tree.delete(item)
 
     def clear(self):
         """清空所有项"""
