@@ -1,3 +1,5 @@
+import calendar
+from datetime import timedelta
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import sqlite3
@@ -9,6 +11,27 @@ import tkinter.font as tkFont
 import platform
 import shutil
 import locale
+import atexit
+
+def cleanup_on_exit():
+    """退出时的清理函数"""
+    try:
+        # 清理 matplotlib
+        if MATPLOTLIB_AVAILABLE:
+            plt.close('all')
+        
+        # 清理 Tkinter
+        import tkinter as tk
+        for widget in tk._default_root.winfo_children() if tk._default_root else []:
+            try:
+                widget.destroy()
+            except:
+                pass
+    except:
+        pass
+
+# 注册退出处理函数
+atexit.register(cleanup_on_exit)
 
 # 设置缩放因子
 SCALE_FACTOR = 1
@@ -144,7 +167,7 @@ class DatabaseManager:
                 FOREIGN KEY (dungeon_id) REFERENCES dungeons (id)
             )
         ''')
-        
+
         # 创建列宽存储表
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS column_widths (
@@ -161,6 +184,14 @@ class DatabaseManager:
                 maximized INTEGER DEFAULT 0,
                 x INTEGER,
                 y INTEGER
+            )
+        ''')
+        
+        # 添加分割窗口位置存储表
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS pane_positions (
+                pane_name TEXT PRIMARY KEY,
+                position INTEGER
             )
         ''')
         
@@ -228,9 +259,30 @@ class DatabaseManager:
         self.conn.commit()
 
     def close(self):
-        """关闭数据库连接"""
-        self.conn.commit()
-        self.conn.close()
+        """安全关闭数据库连接"""
+        try:
+            if hasattr(self, 'cursor'):
+                self.cursor.close()
+            if hasattr(self, 'conn'):
+                self.conn.commit()
+                self.conn.close()
+        except Exception as e:
+            print(f"关闭数据库时出错: {e}")
+        finally:
+            self.cursor = None
+            self.conn = None
+
+    def get_pane_position(self, pane_name):
+        """获取分割窗口位置"""
+        result = self.execute_query("SELECT position FROM pane_positions WHERE pane_name = ?", (pane_name,))
+        return result[0][0] if result else None
+
+    def save_pane_position(self, pane_name, position):
+        """保存分割窗口位置"""
+        self.execute_update('''
+            INSERT OR REPLACE INTO pane_positions (pane_name, position) 
+            VALUES (?, ?)
+        ''', (pane_name, position))
 
 class SpecialItemsTree:
     """特殊物品树形视图"""
@@ -384,6 +436,28 @@ class JX3DungeonTracker:
         # 设置关闭事件
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
+        # 添加 after 任务跟踪
+        self.after_ids = []
+        
+        # 修改时间更新任务
+        self.schedule_time_update()
+
+        # 设置分割窗口事件
+        self.setup_pane_events()
+
+        
+    def schedule_time_update(self):
+        """调度时间更新任务"""
+        if hasattr(self, 'root') and self.root.winfo_exists():
+            after_id = self.root.after(1000, self.update_time)
+            self.after_ids.append(after_id)
+    
+    def update_time(self):
+        """更新时间显示"""
+        if hasattr(self, 'root') and self.root.winfo_exists():
+            self.time_var.set(get_current_time())
+            self.schedule_time_update()
+
     def setup_ui(self):
         """设置用户界面"""
         self.setup_window()
@@ -455,6 +529,10 @@ class JX3DungeonTracker:
         self.search_team_type_var = tk.StringVar()
         self.preset_drops_var = tk.StringVar()
         self.preset_name_var = tk.StringVar()
+        
+        # 秘境记录页面变量
+        self.weekly_worker_var = tk.StringVar()
+        self.weekly_period_var = tk.StringVar()
 
     def setup_styles(self):
         """设置界面样式"""
@@ -507,15 +585,197 @@ class JX3DungeonTracker:
         record_frame = ttk.Frame(notebook)
         stats_frame = ttk.Frame(notebook)
         preset_frame = ttk.Frame(notebook)
+        weekly_frame = ttk.Frame(notebook)
         
         notebook.add(record_frame, text="副本记录")
         notebook.add(stats_frame, text="数据总览")
         notebook.add(preset_frame, text="副本预设")
+        notebook.add(weekly_frame, text="秘境记录")
         
         # 创建各个选项卡内容
         self.create_record_tab(record_frame)
         self.create_stats_tab(stats_frame)
         self.create_preset_tab(preset_frame)
+        self.create_weekly_tab(weekly_frame)
+
+    def create_weekly_tab(self, parent):
+        """创建秘境记录选项卡"""
+        main_frame = ttk.Frame(parent)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=int(10*SCALE_FACTOR), pady=int(10*SCALE_FACTOR))
+        
+        # 顶部控制区域
+        control_frame = ttk.Frame(main_frame)
+        control_frame.pack(fill=tk.X, pady=(0, int(10*SCALE_FACTOR)))
+        
+        # 打工仔选择
+        ttk.Label(control_frame, text="选择打工仔:").pack(side=tk.LEFT, padx=(0, int(5*SCALE_FACTOR)))
+        self.weekly_worker_combo = ttk.Combobox(control_frame, textvariable=self.weekly_worker_var, 
+                                            width=int(20*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+        self.weekly_worker_combo.pack(side=tk.LEFT, padx=(0, int(15*SCALE_FACTOR)))
+        self.weekly_worker_combo.bind("<<ComboboxSelected>>", self.on_weekly_worker_select)
+        
+        # 周期信息显示
+        ttk.Label(control_frame, textvariable=self.weekly_period_var, 
+                font=("PingFang SC", int(10*SCALE_FACTOR), "bold")).pack(side=tk.LEFT)
+        
+        # 刷新按钮
+        ttk.Button(control_frame, text="刷新数据", command=self.load_weekly_data
+                ).pack(side=tk.RIGHT, padx=(int(5*SCALE_FACTOR), 0))
+        
+        # 秘境记录树形表格
+        tree_frame = ttk.LabelFrame(main_frame, text="本周秘境记录", padding=int(8*SCALE_FACTOR))
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # 创建树形视图
+        columns = ("worker", "dungeon", "note")
+        self.weekly_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", 
+                                    height=int(15*SCALE_FACTOR), selectmode="browse")
+        
+        # 设置列
+        column_config = [
+            ("worker", "打工仔", int(120*SCALE_FACTOR)),
+            ("dungeon", "副本", int(150*SCALE_FACTOR)),
+            ("note", "备注", int(200*SCALE_FACTOR))
+        ]
+        
+        for col_id, heading, width in column_config:
+            self.weekly_tree.heading(col_id, text=heading, anchor="center")
+            self.weekly_tree.column(col_id, width=width, anchor=tk.CENTER, stretch=(col_id == "note"))
+        
+        # 添加滚动条
+        vsb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.weekly_tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=self.weekly_tree.xview)
+        self.weekly_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        
+        # 布局
+        self.weekly_tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        
+        tree_frame.columnconfigure(0, weight=1)
+        tree_frame.rowconfigure(0, weight=1)
+        
+        # 设置列宽调整
+        self.setup_column_resizing(self.weekly_tree)
+        
+        # 初始加载数据
+        self.load_weekly_worker_options()
+        self.load_weekly_data()
+
+    def load_weekly_worker_options(self):
+        """加载秘境记录页面的打工仔选项"""
+        workers = [row[0] for row in self.db.execute_query(
+            "SELECT DISTINCT worker FROM records WHERE worker IS NOT NULL AND worker != '' ORDER BY worker"
+        )]
+        self.weekly_worker_combo['values'] = [""] + workers  # 空选项表示显示全部
+
+    def on_weekly_worker_select(self, event=None):
+        """处理打工仔选择事件"""
+        self.load_weekly_data()
+
+    def get_weekly_time_range(self, team_type):
+        """根据团队类型计算本周的时间范围"""
+        now = datetime.datetime.now()
+        
+        if team_type == "十人本":
+            # 十人本每周重置两次：周一7点和周五7点
+            if now.weekday() == 0 and now.hour < 7:  # 周一7点前，算上一周期
+                start_date = now - timedelta(days=now.weekday() + 3)  # 上周五
+                start_date = start_date.replace(hour=7, minute=0, second=0, microsecond=0)
+                end_date = now.replace(hour=7, minute=0, second=0, microsecond=0)
+            elif now.weekday() < 4 or (now.weekday() == 4 and now.hour < 7):  # 周五7点前
+                start_date = now - timedelta(days=now.weekday())
+                start_date = start_date.replace(hour=7, minute=0, second=0, microsecond=0)
+                end_date = now.replace(hour=7, minute=0, second=0, microsecond=0)
+                if now.weekday() == 4 and now.hour < 7:  # 周五7点前，结束时间是本周五7点
+                    end_date = start_date + timedelta(days=4)
+                else:  # 周一到周四，结束时间是本周五7点
+                    end_date = start_date + timedelta(days=4)
+                    end_date = end_date.replace(hour=7, minute=0, second=0, microsecond=0)
+            else:  # 周五7点后到下周一的7点前
+                start_date = now - timedelta(days=(now.weekday() - 4))
+                start_date = start_date.replace(hour=7, minute=0, second=0, microsecond=0)
+                end_date = start_date + timedelta(days=3)
+                end_date = end_date.replace(hour=7, minute=0, second=0, microsecond=0)
+        else:  # 二十五人本
+            # 二十五人本每周重置一次：周一7点
+            if now.weekday() == 0 and now.hour < 7:  # 周一7点前，算上一周
+                start_date = now - timedelta(days=now.weekday() + 7)
+                start_date = start_date.replace(hour=7, minute=0, second=0, microsecond=0)
+                end_date = now.replace(hour=7, minute=0, second=0, microsecond=0)
+            else:  # 周一7点后到下周一的7点前
+                start_date = now - timedelta(days=now.weekday())
+                start_date = start_date.replace(hour=7, minute=0, second=0, microsecond=0)
+                end_date = start_date + timedelta(days=7)
+        
+        return start_date, end_date
+
+    def load_weekly_data(self):
+        """加载本周秘境记录数据"""
+        # 清空现有数据
+        for item in self.weekly_tree.get_children():
+            self.weekly_tree.delete(item)
+        
+        # 获取选中的打工仔
+        selected_worker = self.weekly_worker_var.get()
+        
+        # 构建查询条件
+        conditions = []
+        params = []
+        
+        if selected_worker:
+            conditions.append("r.worker = ?")
+            params.append(selected_worker)
+        else:
+            conditions.append("r.worker IS NOT NULL AND r.worker != ''")
+        
+        # 分别查询十人本和二十五人本的本周记录
+        team_types = ["十人本", "二十五人本"]
+        all_records = []
+        
+        for team_type in team_types:
+            start_date, end_date = self.get_weekly_time_range(team_type)
+            
+            # 构建查询SQL
+            sql = '''
+                SELECT r.worker, d.name, r.note, r.time, r.team_type
+                FROM records r
+                JOIN dungeons d ON r.dungeon_id = d.id
+                WHERE r.time >= ? AND r.time < ? AND r.team_type = ?
+            '''
+            
+            if conditions:
+                sql += " AND " + " AND ".join(conditions)
+            
+            sql += " ORDER BY r.time DESC"
+            
+            # 执行查询
+            records = self.db.execute_query(sql, [start_date.strftime("%Y-%m-%d %H:%M:%S"), 
+                                                end_date.strftime("%Y-%m-%d %H:%M:%S"), 
+                                                team_type] + params)
+            all_records.extend(records)
+        
+        # 显示记录
+        for record in all_records:
+            worker, dungeon, note, time_str, team_type = record
+            display_note = note if note else ""
+            self.weekly_tree.insert("", "end", values=(worker, f"{dungeon}({team_type})", display_note))
+        
+        # 更新周期信息显示
+        self.update_weekly_period_info()
+
+    def update_weekly_period_info(self):
+        """更新周期信息显示"""
+        now = datetime.datetime.now()
+        
+        # 十人本周期信息
+        ten_start, ten_end = self.get_weekly_time_range("十人本")
+        twenty_five_start, twenty_five_end = self.get_weekly_time_range("二十五人本")
+        
+        ten_period = f"十人本周期: {ten_start.strftime('%m-%d %H:%M')} 至 {ten_end.strftime('%m-%d %H:%M')}"
+        twenty_five_period = f"二十五人本周期: {twenty_five_start.strftime('%m-%d %H:%M')} 至 {twenty_five_end.strftime('%m-%d %H:%M')}"
+        
+        self.weekly_period_var.set(f"{ten_period} | {twenty_five_period}")
 
     def create_record_tab(self, parent):
         """创建记录选项卡"""
@@ -530,6 +790,13 @@ class JX3DungeonTracker:
         
         pane.add(form_frame, weight=1)
         pane.add(list_frame, weight=2)
+        
+        # 设置分割窗口标识
+        self.record_pane = pane
+        self.record_pane_name = "record_pane"
+        
+        # 恢复分割位置
+        self.restore_pane_position(self.record_pane, self.record_pane_name)
 
     def build_record_form(self, parent):
         """构建记录表单"""
@@ -555,12 +822,12 @@ class JX3DungeonTracker:
         
         ttk.Label(add_special_frame, text="物品:").grid(row=0, column=0, padx=(0, int(5*SCALE_FACTOR)), sticky="w")
         self.special_item_combo = ttk.Combobox(add_special_frame, textvariable=self.special_item_var, 
-                                              width=int(15*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+                                              width=int(22*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
         self.special_item_combo.grid(row=0, column=1, padx=(0, int(5*SCALE_FACTOR)), sticky="ew")
         
         ttk.Label(add_special_frame, text="金额:").grid(row=0, column=2, padx=(int(5*SCALE_FACTOR), int(5*SCALE_FACTOR)), sticky="w")
         self.special_price_entry = ttk.Entry(add_special_frame, textvariable=self.special_price_var, 
-                                            width=int(10*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+                                            width=int(7*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
         self.special_price_entry.grid(row=0, column=3, padx=(0, int(5*SCALE_FACTOR)), sticky="w")
         
         ttk.Button(add_special_frame, text="添加", width=int(6*SCALE_FACTOR), command=self.add_special_item
@@ -652,7 +919,7 @@ class JX3DungeonTracker:
         
         ttk.Label(parent, text="备注:").grid(row=3, column=0, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W)
         self.note_entry = ttk.Entry(parent, textvariable=self.note_var, 
-                                   width=int(20*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
+                                   width=int(30*SCALE_FACTOR), font=("PingFang SC", int(10*SCALE_FACTOR)))
         self.note_entry.grid(row=3, column=1, padx=int(3*SCALE_FACTOR), pady=int(2*SCALE_FACTOR), sticky=tk.W, columnspan=3)
 
     def build_gold_fields(self, parent):
@@ -705,6 +972,11 @@ class JX3DungeonTracker:
         vsb = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=self.record_tree.yview)
         hsb = ttk.Scrollbar(parent, orient=tk.HORIZONTAL, command=self.record_tree.xview)
         self.record_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        self.record_tree.bind("<Motion>", self.on_tree_motion)
+        self.record_tree.bind("<Leave>", self.hide_tooltip)
+        # 绑定到整个 Treeview 框架，确保鼠标离开时隐藏提示
+        tree_frame.bind("<Leave>", self.hide_tooltip)
         
         self.record_tree.grid(row=1, column=0, sticky="nsew")
         vsb.grid(row=1, column=1, sticky="ns")
@@ -933,17 +1205,171 @@ class JX3DungeonTracker:
 
     def create_preset_tab(self, parent):
         """创建预设选项卡"""
-        pane = ttk.PanedWindow(parent, orient=tk.VERTICAL)
-        pane.pack(fill=tk.BOTH, expand=True)
+        # 使用Frame而不是PanedWindow来避免分割条问题
+        main_frame = ttk.Frame(parent)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=int(5*SCALE_FACTOR), pady=int(5*SCALE_FACTOR))
         
-        list_frame = ttk.LabelFrame(pane, text="副本列表", padding=int(8*SCALE_FACTOR))
+        # 上部：副本列表
+        list_frame = ttk.LabelFrame(main_frame, text="副本列表", padding=int(8*SCALE_FACTOR))
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, int(5*SCALE_FACTOR)))
         self.build_dungeon_list(list_frame)
         
-        form_frame = ttk.LabelFrame(pane, text="副本详情", padding=int(8*SCALE_FACTOR))
+        # 下部：副本详情
+        form_frame = ttk.LabelFrame(main_frame, text="副本详情", padding=int(8*SCALE_FACTOR))
+        form_frame.pack(fill=tk.X, pady=(0, int(5*SCALE_FACTOR)))
         self.build_dungeon_form(form_frame)
         
-        pane.add(list_frame, weight=2)
-        pane.add(form_frame, weight=1)
+        # 设置固定高度给表单区域
+        form_frame.configure(height=int(200*SCALE_FACTOR))
+
+    def restore_pane_position(self, pane, pane_name):
+        """恢复分割窗口位置"""
+        try:
+            result = self.db.execute_query("SELECT position FROM pane_positions WHERE pane_name = ?", (pane_name,))
+            if result:
+                position = result[0][0]
+                if position is not None:
+                    # 等待窗口完全渲染后再设置位置
+                    self.root.after(500, lambda: self.safe_set_pane_position(pane, pane_name, position))
+        except Exception as e:
+            print(f"恢复分割窗口位置失败: {e}")
+
+    def safe_set_pane_position(self, pane, pane_name, position):
+        """安全设置分割窗口位置"""
+        try:
+            if not pane.winfo_exists():
+                return
+                
+            # 确保面板已经完成布局
+            pane.update_idletasks()
+            
+            # 获取当前面板尺寸
+            pane_width = pane.winfo_width()
+            pane_height = pane.winfo_height()
+            
+            # 如果面板尺寸为1（未完成布局），延迟重试
+            if pane_width <= 1 or pane_height <= 1:
+                self.root.after(100, lambda: self.safe_set_pane_position(pane, pane_name, position))
+                return
+            
+            # 根据方向验证位置合理性
+            orient = pane.cget('orient')
+            if orient == 'horizontal':
+                max_position = pane_width - 100  # 保留最小宽度
+                actual_position = min(position, max_position)
+                if actual_position > 50:  # 确保位置合理
+                    pane.sash_place(0, actual_position, 0)
+            else:  # vertical
+                max_position = pane_height - 100  # 保留最小高度
+                actual_position = min(position, max_position)
+                if actual_position > 50:  # 确保位置合理
+                    pane.sash_place(0, 0, actual_position)
+                    
+            print(f"分割窗口 '{pane_name}' 位置已设置为: {actual_position}")
+            
+        except Exception as e:
+            print(f"设置分割窗口位置失败: {e}")
+
+    def save_pane_positions(self):
+        """保存所有分割窗口的位置"""
+        try:
+            # 保存记录面板位置
+            if hasattr(self, 'record_pane') and self.record_pane.winfo_exists():
+                try:
+                    # 获取水平分割窗口的位置
+                    sash_pos = self.record_pane.sashpos(0)
+                    if sash_pos is not None and sash_pos > 0:
+                        self.db.save_pane_position(self.record_pane_name, sash_pos)
+                        print(f"保存记录面板位置: {sash_pos}")
+                except Exception as e:
+                    print(f"保存记录面板位置失败: {e}")
+            
+            # 保存预设面板位置
+            if hasattr(self, 'preset_pane') and self.preset_pane.winfo_exists():
+                try:
+                    # 获取垂直分割窗口的位置
+                    sash_pos = self.preset_pane.sashpos(0)
+                    if sash_pos is not None and sash_pos > 0:
+                        self.db.save_pane_position(self.preset_pane_name, sash_pos)
+                        print(f"保存预设面板位置: {sash_pos}")
+                except Exception as e:
+                    print(f"保存预设面板位置失败: {e}")
+                    
+        except Exception as e:
+            print(f"保存分割窗口位置失败: {e}")
+
+    def restore_pane_position(self, pane, pane_name):
+        """恢复分割窗口位置"""
+        try:
+            result = self.db.execute_query("SELECT position FROM pane_positions WHERE pane_name = ?", (pane_name,))
+            if result:
+                position = result[0][0]
+                if position is not None:
+                    # 延迟设置分割位置，确保窗口已经渲染
+                    self.root.after(300, lambda: self.set_pane_position(pane, position))
+        except Exception as e:
+            print(f"恢复分割窗口位置失败: {e}")
+
+    def set_pane_position(self, pane, position):
+        """设置分割窗口位置"""
+        try:
+            # 使用 sashpos 方法设置位置，而不是 sash_place
+            pane.sashpos(0, position)
+        except Exception as e:
+            print(f"设置分割窗口位置失败: {e}")
+            # 如果设置失败，尝试使用 sash_place 方法
+            try:
+                # 获取面板的方向
+                orient = pane.cget('orient')
+                if orient == 'horizontal':
+                    pane.sash_place(0, position, 0)
+                else:  # vertical
+                    pane.sash_place(0, 0, position)
+            except Exception as e2:
+                print(f"备用设置方法也失败: {e2}")
+
+    def setup_pane_events(self):
+        """设置分割窗口事件"""
+        # 为分割窗口添加配置变化事件
+        def on_pane_configure(event):
+            # 延迟保存，避免频繁操作
+            if hasattr(self, '_pane_save_scheduled'):
+                self.root.after_cancel(self._pane_save_scheduled)
+            self._pane_save_scheduled = self.root.after(1000, self.save_pane_positions)
+        
+        if hasattr(self, 'record_pane'):
+            self.record_pane.bind('<Configure>', on_pane_configure)
+            # 设置默认位置
+            self.root.after(1000, lambda: self.set_default_pane_positions())
+        
+        # 添加定期保存
+        self.schedule_pane_position_check()
+
+    def set_default_pane_positions(self):
+        """设置默认分割位置"""
+        try:
+            # 检查记录面板是否有保存的位置，如果没有则设置默认值
+            result = self.db.execute_query("SELECT position FROM pane_positions WHERE pane_name = ?", (self.record_pane_name,))
+            if not result:
+                # 设置记录面板默认位置（宽度350）
+                default_position = int(350 * SCALE_FACTOR)
+                self.record_pane.sash_place(0, default_position, 0)
+                self.db.save_pane_position(self.record_pane_name, default_position)
+                print(f"设置记录面板默认位置: {default_position}")
+        except Exception as e:
+            print(f"设置默认分割位置失败: {e}")
+
+    def schedule_pane_position_check(self):
+        """定期检查分割位置变化"""
+        if hasattr(self, 'root') and self.root.winfo_exists():
+            try:
+                self.save_pane_positions()
+            except Exception as e:
+                print(f"定期保存分割位置失败: {e}")
+            
+            # 每10秒检查一次
+            after_id = self.root.after(10000, self.schedule_pane_position_check)
+            self.after_ids.append(after_id)
 
     def build_dungeon_list(self, parent):
         """构建副本列表"""
@@ -1153,6 +1579,8 @@ class JX3DungeonTracker:
         self.update_stats()
         self.load_black_owner_options()
         self.clear_new_record_highlights()
+        # 加载秘境记录数据
+        self.load_weekly_data()
         
         print(f"数据加载完成 - 记录树中的项目数量: {len(self.record_tree.get_children())}")
 
@@ -1421,6 +1849,7 @@ class JX3DungeonTracker:
             
             messagebox.showinfo("成功", "记录已添加")
             self.clear_form()
+            self.load_weekly_data()
             
         except Exception as e:
             messagebox.showerror("错误", f"保存记录时出错: {str(e)}")
@@ -1524,6 +1953,8 @@ class JX3DungeonTracker:
         self.load_black_owner_options()
         messagebox.showinfo("成功", "记录已更新")
         self.clear_form()
+        # 刷新秘境记录数据
+        self.load_weekly_data()
 
     def clear_form(self):
         """清空表单"""
@@ -1672,6 +2103,7 @@ class JX3DungeonTracker:
         self.update_stats()
         self.load_black_owner_options()
         messagebox.showinfo("成功", "记录已删除")
+        self.load_weekly_data()
 
     def on_tree_motion(self, event):
         """处理树形视图鼠标移动事件"""
@@ -1679,13 +2111,33 @@ class JX3DungeonTracker:
         row_id = self.record_tree.identify_row(event.y)
         col_id = self.record_tree.identify_column(event.x)
         
-        if not row_id:
+        # 添加列索引有效性检查
+        if not row_id or not col_id or col_id == '#0':
             return
             
+        # 确保列索引是有效的数字
+        try:
+            # 将 '#1' 格式的列索引转换为整数索引
+            col_index = int(col_id.replace('#', '')) - 1  # 转换为0-based索引
+            columns = self.record_tree["columns"]
+            
+            # 检查索引是否在有效范围内
+            if col_index < 0 or col_index >= len(columns):
+                return
+                
+            # 使用实际的列标识符
+            actual_col_id = columns[col_index]
+            col_name = self.record_tree.heading(actual_col_id)["text"]
+        except (ValueError, IndexError, tk.TclError):
+            return
+        
         item = self.record_tree.item(row_id)
-        col_name = self.record_tree.heading(col_id)["text"]
         values = item['values']
         
+        # 确保有足够的列值
+        if len(values) <= col_index:
+            return
+            
         dungeon_name = values[1]
         time_str = values[2]
         
@@ -1748,7 +2200,8 @@ class JX3DungeonTracker:
 
     def hide_tooltip(self, event=None):
         """隐藏工具提示"""
-        self.tooltip.withdraw()
+        if hasattr(self, 'tooltip') and self.tooltip.winfo_exists():
+            self.tooltip.withdraw()
 
     def update_stats(self):
         """更新统计信息"""
@@ -2102,22 +2555,74 @@ class JX3DungeonTracker:
 
     def on_close(self):
         """处理关闭事件"""
-        self.clear_new_record_highlights()
-        self.save_column_widths()
+        try:
+            # 取消所有挂起的 after 任务
+            for after_id in self.root.tk.call('after', 'info'):
+                try:
+                    self.root.after_cancel(after_id)
+                except:
+                    pass
+            
+            # 隐藏窗口，立即响应
+            self.root.withdraw()
+            self.root.update()
+            
+            # 清除新记录高亮
+            self.clear_new_record_highlights()
+            
+            # 保存列宽设置
+            self.save_column_widths()
+            
+            # 保存分割窗口位置
+            self.save_pane_positions()
+            
+            # 保存窗口状态
+            if hasattr(self, 'root') and self.root.winfo_exists():
+                width = self.root.winfo_width()
+                height = self.root.winfo_height()
+                x = self.root.winfo_x()
+                y = self.root.winfo_y()
+                maximized = 1 if self.root.state() == 'zoomed' else 0
+                
+                self.db.execute_update("DELETE FROM window_state")
+                self.db.execute_update("INSERT INTO window_state (width, height, maximized, x, y) VALUES (?, ?, ?, ?, ?)", 
+                                    (width, height, maximized, x, y))
+            
+            # 关闭数据库连接
+            if hasattr(self, 'db'):
+                self.db.close()
+            
+            # 释放 Matplotlib 资源
+            if MATPLOTLIB_AVAILABLE and hasattr(self, 'fig'):
+                try:
+                    plt.close(self.fig)
+                except:
+                    pass
+            
+            # 销毁所有子窗口
+            for child in self.root.winfo_children():
+                try:
+                    child.destroy()
+                except:
+                    pass
+            
+            # 强制垃圾回收
+            import gc
+            gc.collect()
+            
+        except Exception as e:
+            print(f"关闭过程中发生错误: {e}")
         
-        # 保存窗口状态
-        width = self.root.winfo_width()
-        height = self.root.winfo_height()
-        x = self.root.winfo_x()
-        y = self.root.winfo_y()
-        maximized = 1 if self.root.state() == 'zoomed' else 0
-        
-        self.db.execute_update("DELETE FROM window_state")
-        self.db.execute_update("INSERT INTO window_state (width, height, maximized, x, y) VALUES (?, ?, ?, ?, ?)", 
-                              (width, height, maximized, x, y))
-        
-        self.db.close()
-        self.root.destroy()
+        finally:
+            # 确保进程退出
+            if hasattr(self, 'root') and self.root.winfo_exists():
+                self.root.quit()
+                self.root.destroy()
+            
+            # 在极端情况下强制退出
+            import os
+            import signal
+            os._exit(0)
 
 if __name__ == "__main__":
     missing_libs = check_dependencies()
@@ -2128,5 +2633,20 @@ if __name__ == "__main__":
         root.destroy()
     else:
         root = tk.Tk()
-        app = JX3DungeonTracker(root)
-        root.mainloop()
+        try:
+            app = JX3DungeonTracker(root)
+            root.mainloop()
+        except Exception as e:
+            print(f"应用程序错误: {e}")
+        finally:
+            # 确保资源清理
+            try:
+                if 'app' in locals():
+                    app.on_close()
+            except:
+                pass
+            try:
+                root.quit()
+                root.destroy()
+            except:
+                pass
