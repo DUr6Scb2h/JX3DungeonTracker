@@ -562,29 +562,33 @@ class DBAnalyzer:
         return black_person
 
     def calculate_final_result_with_gkp(self, analysis_data, segment, remark, filename, gkp_info):
-
         black_person = self.determine_black_person(analysis_data)
-        
 
         if not black_person and analysis_data.get("black_person"):
             black_person = analysis_data["black_person"]
-            
+
         personal_salary = max(analysis_data["personal_salaries"]) if analysis_data["personal_salaries"] else 0
         note_parts = []
+
         if analysis_data.get("difficulty_note") and analysis_data["difficulty_note"]:
             note_parts.append(analysis_data["difficulty_note"])
+
         if personal_salary == 10:
             personal_salary = 0
             note_parts.append("躺拍")
             if analysis_data["penalty_total"] > 0:
                 note_parts.append(f"抵消{analysis_data['penalty_total']}金")
+        
         note = "，".join(note_parts)
+
         subsidy = 0
         if personal_salary > 0:
             if personal_salary > analysis_data["base_salary"]:
-                subsidy = analysis_data["penalty_total"] + (personal_salary - analysis_data["base_salary"])
+                subsidy = personal_salary - analysis_data["base_salary"]
+
         start_time_str = dt.datetime.fromtimestamp(segment['start_time']).strftime('%Y-%m-%d %H:%M:%S')
         end_time_str = dt.datetime.fromtimestamp(segment['end_time']).strftime('%Y-%m-%d %H:%M:%S')
+
         analysis_result = {
             "filename": filename,
             "remark": remark,
@@ -612,6 +616,7 @@ class DBAnalyzer:
             "total_consumption": analysis_data["total_consumption"],
             "gkp_file": gkp_info['file_name']
         }
+
         analysis_result["uid"] = self.generate_uid(analysis_result)
         return analysis_result
 
@@ -1094,23 +1099,29 @@ class DBAnalyzer:
 
         if not black_person and analysis_data.get("black_person"):
             black_person = analysis_data["black_person"]
-            
+
         personal_salary = max(analysis_data["personal_salaries"]) if analysis_data["personal_salaries"] else 0
         note_parts = []
+
         if analysis_data.get("difficulty_note"):
             note_parts.append(analysis_data["difficulty_note"])
+
         if personal_salary == 10:
             personal_salary = 0
             note_parts.append("躺拍")
             if analysis_data["penalty_total"] > 0:
                 note_parts.append(f"抵消{analysis_data['penalty_total']}金")
+        
         note = "，".join(note_parts)
+
         subsidy = 0
         if personal_salary > 0:
             if personal_salary > analysis_data["base_salary"]:
-                subsidy = analysis_data["penalty_total"] + (personal_salary - analysis_data["base_salary"])
+                subsidy = personal_salary - analysis_data["base_salary"]
+
         start_time_str = dt.datetime.fromtimestamp(records[start_idx][0]).strftime('%Y-%m-%d %H:%M:%S')
         end_time_str = dt.datetime.fromtimestamp(records[end_idx][0]).strftime('%Y-%m-%d %H:%M:%S')
+
         analysis_result = {
             "filename": filename,
             "remark": remark,
@@ -1137,6 +1148,7 @@ class DBAnalyzer:
             "other_consumption": analysis_data["other_consumption"],
             "total_consumption": analysis_data["total_consumption"]
         }
+
         analysis_result["uid"] = self.generate_uid(analysis_result)
         return analysis_result
 
